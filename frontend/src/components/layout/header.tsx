@@ -16,8 +16,6 @@ export function Header() {
   const { user, logout } = useAuth();
   const router = useRouter();
 
-  const isAdmin = user?.role === "admin";
-
   const handleLogout = () => {
     logout();
     router.push("/login");
@@ -29,11 +27,7 @@ export function Header() {
         <div />
 
         {/* Right */}
-        <div className="flex items-center gap-4">
-          <span className="text-xs font-medium text-muted-foreground bg-secondary px-2 py-1 rounded-md">
-            On-Premise
-          </span>
-
+        <div className="flex items-center gap-3">
           <DropdownMenu>
             <DropdownMenuTrigger className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-secondary transition-colors cursor-pointer">
               <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center text-primary text-xs font-bold">
@@ -49,12 +43,6 @@ export function Header() {
                 <span className="material-symbols-outlined mr-2 text-base">person</span>
                 Profile
               </DropdownMenuItem>
-              {isAdmin && (
-                <DropdownMenuItem onClick={() => router.push("/settings")}>
-                  <span className="material-symbols-outlined mr-2 text-base">settings</span>
-                  Settings
-                </DropdownMenuItem>
-              )}
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleLogout} className="text-destructive">
                 <span className="material-symbols-outlined mr-2 text-base">logout</span>

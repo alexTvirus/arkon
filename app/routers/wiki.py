@@ -82,8 +82,14 @@ async def get_wiki_page(
     _user: Employee = require_permission("kb.read"),
 ):
     sid = uuid.UUID(scope_id) if scope_id else None
-    st = scope_type or "global"
-    page = await wiki_service.get_page_by_slug(db, slug, scope_type=st, scope_id=sid)
+    if scope_type:
+        # Explicit scope requested
+        page = await wiki_service.get_page_by_slug(db, slug, scope_type=scope_type, scope_id=sid)
+    else:
+        # No scope specified — try global first, then fallback to any scope
+        page = await wiki_service.get_page_by_slug(db, slug, scope_type="global", scope_id=None)
+        if not page:
+            page = await wiki_service.get_page_by_slug_any_scope(db, slug)
     if not page:
         raise HTTPException(404, f"Wiki page not found: {slug}")
     backlinks = await wiki_service.get_backlinks(db, slug)
@@ -145,22 +151,71 @@ async def delete_wiki_page(
 async def get_wiki_graph(
     slug: Optional[str] = Query(None, description="Center the graph on this slug; omit for full graph"),
     depth: int = Query(1, ge=1, le=3),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     _user: Employee = require_permission("kb.read"),
 ):
-    """Return nodes/edges for visualization. Without `slug`, returns the full graph."""
+    """Return nodes/edges for visualization. Supports pagination for large graphs."""
     if slug:
         return await wiki_service.get_neighborhood(db, slug, depth=depth)
 
-    # Full graph
-    from sqlalchemy import select
-    from app.database.models import WikiLink
-    pages = (await db.execute(
-        select(WikiPage.slug, WikiPage.title, WikiPage.page_type)
-        .where(WikiPage.slug.notin_([wiki_service.INDEX_SLUG, wiki_service.LOG_SLUG]))
-    )).all()
-    edges = (await db.execute(select(WikiLink.from_slug, WikiLink.to_slug))).all()
+    # Full graph — paginated, include scope info for visual classification
+    from sqlalchemy import select, outerjoin, func as sqlfunc
+    from app.database.models import WikiLink, Project
+
+    base_filter = WikiPage.slug.notin_([wiki_service.INDEX_SLUG, wiki_service.LOG_SLUG])
+
+    # Total count
+    total = (await db.execute(
+        select(sqlfunc.count()).select_from(WikiPage).where(base_filter)
+    )).scalar() or 0
+
+    # Fetch paginated nodes
+    stmt = (
+        select(
+            WikiPage.slug,
+            WikiPage.title,
+            WikiPage.page_type,
+            WikiPage.scope_type,
+            WikiPage.scope_id,
+            Project.name.label("scope_name"),
+        )
+        .select_from(
+            outerjoin(WikiPage, Project, WikiPage.scope_id == Project.id)
+        )
+        .where(base_filter)
+        .order_by(WikiPage.slug)
+        .offset(offset)
+        .limit(limit)
+    )
+    pages = (await db.execute(stmt)).all()
+    page_slugs = [r.slug for r in pages]
+
+    # Edges — return ALL on first batch (offset=0), empty on subsequent batches.
+    # Edges are lightweight (two strings each), so sending all at once is fine.
+    # This ensures cross-batch relationships are preserved during progressive loading.
+    if offset == 0:
+        edges = (await db.execute(
+            select(WikiLink.from_slug, WikiLink.to_slug)
+        )).all()
+    else:
+        edges = []
+
     return {
-        "nodes": [{"slug": r.slug, "title": r.title, "page_type": r.page_type} for r in pages],
+        "nodes": [
+            {
+                "slug": r.slug,
+                "title": r.title,
+                "page_type": r.page_type,
+                "scope_type": r.scope_type or "global",
+                "scope_id": str(r.scope_id) if r.scope_id else None,
+                "scope_name": r.scope_name,
+            }
+            for r in pages
+        ],
         "edges": [{"from": r.from_slug, "to": r.to_slug} for r in edges],
+        "total": total,
+        "offset": offset,
+        "has_more": offset + limit < total,
     }

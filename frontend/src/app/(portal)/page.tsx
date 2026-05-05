@@ -1,116 +1,119 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useAuth } from "@/lib/auth";
+import { useEffect, useState, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { PageHeader } from "@/components/shared/page-header";
-import { StatCard } from "@/components/shared/stat-card";
-import { McpConnectionCard } from "@/components/dashboard/mcp-connection-card";
-import { RecentSourcesCard } from "@/components/dashboard/recent-sources-card";
-import { SystemHealthCard } from "@/components/dashboard/system-health-card";
+import { Button } from "@/components/ui/button";
+import { ProjectList } from "@/components/projects/project-list";
+import { ProjectDialog } from "@/components/projects/project-dialog";
+import { ProjectDetail } from "@/components/projects/project-detail";
 
-type DashboardStats = {
-  total_sources: number;
-  total_chunks: number;
-  departments?: number;
-  employees?: number;
+export type Project = {
+  id: string;
+  name: string;
+  description?: string;
+  workspace_type: string;
+  status: string;
+  member_count: number;
+  source_count: number;
+  created_at: string;
 };
 
 export default function DashboardPage() {
-  const { user } = useAuth();
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [statsError, setStatsError] = useState(false);
+  const { user, hasPermission } = useAuth();
+  const canManage = hasPermission("workspaces.create");
+
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editProject, setEditProject] = useState<Project | null>(null);
+  const [detailProject, setDetailProject] = useState<Project | null>(null);
+
+  const searchParams = useSearchParams();
+  const router = useRouter();
+
+  const loadProjects = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api<Project[]>("/api/projects");
+      setProjects(data);
+    } catch {
+      setProjects([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    async function load() {
-      setStatsError(false);
-      try {
-        const sources = await api<unknown[]>("/api/sources");
-        const stats: DashboardStats = {
-          total_sources: Array.isArray(sources) ? sources.length : 0,
-          total_chunks: 0,
-        };
+    loadProjects();
+  }, [loadProjects]);
 
-        if (user?.role === "admin") {
-          try {
-            const depts = await api<unknown[]>("/api/departments");
-            stats.departments = Array.isArray(depts) ? depts.length : 0;
-          } catch {
-            stats.departments = undefined;
-          }
-          try {
-            const emps = await api<unknown[]>("/api/employees");
-            stats.employees = Array.isArray(emps) ? emps.length : 0;
-          } catch {
-            stats.employees = undefined;
-          }
-        }
-
-        setStats(stats);
-      } catch {
-        setStatsError(true);
-        setStats({ total_sources: 0, total_chunks: 0 });
-      }
+  // Auto-open create dialog from sidebar shortcut (?new=1)
+  useEffect(() => {
+    if (searchParams.get("new") === "1" && canManage) {
+      setEditProject(null);
+      setDialogOpen(true);
+      router.replace("/", { scroll: false });
     }
-    load();
-  }, [user]);
+  }, [searchParams, canManage, router]);
+
+  const handleCreate = () => {
+    setEditProject(null);
+    setDialogOpen(true);
+  };
+
+  const handleEdit = (project: Project) => {
+    setEditProject(project);
+    setDialogOpen(true);
+  };
+
+  if (detailProject) {
+    return (
+      <ProjectDetail
+        project={detailProject}
+        isAdmin={canManage}
+        onBack={() => { setDetailProject(null); loadProjects(); }}
+      />
+    );
+  }
 
   return (
     <>
       <PageHeader
-        title="Enterprise Overview"
-        description="Monitor the health and scale of your AI knowledge ecosystem."
+        title="Dashboard"
+        description="Manage projects and customer engagements — each with its own team and documents."
+        action={
+          canManage ? (
+            <Button
+              onClick={handleCreate}
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              <span className="material-symbols-outlined text-base mr-1">add</span>
+              New Workspace
+            </Button>
+          ) : undefined
+        }
       />
 
-      {statsError && (
-        <div className="text-sm text-destructive bg-destructive/10 px-4 py-3 rounded-lg flex items-center gap-2">
-          <span className="material-symbols-outlined text-base">warning</span>
-          Could not load dashboard statistics. Check your connection or try refreshing.
-        </div>
+      <ProjectList
+        projects={projects}
+        loading={loading}
+        isAdmin={canManage}
+        onEdit={handleEdit}
+        onOpen={setDetailProject}
+        onRefresh={loadProjects}
+      />
+
+      {canManage && (
+        <ProjectDialog
+          open={dialogOpen}
+          onOpenChange={setDialogOpen}
+          project={editProject}
+          onSaved={loadProjects}
+        />
       )}
-
-      {/* Stat Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-        <StatCard
-          label="Documents"
-          value={stats?.total_sources ?? "—"}
-          icon="description"
-          subtitle="Total knowledge sources"
-        />
-        {user?.role === "admin" && (
-          <>
-            <StatCard
-              label="Departments"
-              value={stats?.departments ?? "—"}
-              icon="business"
-              subtitle="Active departments"
-            />
-            <StatCard
-              label="Employees"
-              value={stats?.employees ?? "—"}
-              icon="group"
-              subtitle="Registered users"
-            />
-          </>
-        )}
-        <StatCard
-          label="MCP Status"
-          value="Online"
-          icon="check_circle"
-          subtitle="Server ready"
-        />
-      </div>
-
-      {/* Main Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 flex flex-col gap-6">
-          <SystemHealthCard />
-          <RecentSourcesCard />
-        </div>
-        <div className="flex flex-col gap-6">
-          <McpConnectionCard />
-        </div>
-      </div>
     </>
   );
 }

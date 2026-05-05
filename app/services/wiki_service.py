@@ -184,6 +184,20 @@ async def get_page_by_slug(
     return None
 
 
+async def get_page_by_slug_any_scope(
+    session: AsyncSession,
+    slug: str,
+) -> Optional[WikiPage]:
+    """
+    Fetch a page by slug across ALL scopes (no scope filtering).
+    Used as a fallback when no explicit scope is specified, e.g. global graph view
+    clicking on a workspace-scoped wiki page.
+    """
+    stmt = select(WikiPage).where(WikiPage.slug == slug).limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
 async def list_pages(
     session: AsyncSession,
     page_type: Optional[str] = None,

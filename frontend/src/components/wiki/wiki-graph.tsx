@@ -13,10 +13,78 @@ import {
 } from "d3-force";
 import { wikiTypeColor, wikiTypeGroupLabel, wikiTypeIcon } from "./wiki-type-badge";
 
+// --- Convex hull for scope cluster bubbles ---
+function convexHull(points: [number, number][]): [number, number][] {
+  if (points.length <= 1) return points;
+  const sorted = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o: [number, number], a: [number, number], b: [number, number]) =>
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower: [number, number][] = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0)
+      lower.pop();
+    lower.push(p);
+  }
+  const upper: [number, number][] = [];
+  for (const p of sorted.reverse()) {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0)
+      upper.pop();
+    upper.push(p);
+  }
+  upper.pop();
+  lower.pop();
+  return lower.concat(upper);
+}
+
+function hullToPath(hull: [number, number][], padding: number): string {
+  if (hull.length === 0) return "";
+  if (hull.length === 1) {
+    const [x, y] = hull[0];
+    return `M ${x - padding},${y} A ${padding},${padding} 0 1,0 ${x + padding},${y} A ${padding},${padding} 0 1,0 ${x - padding},${y} Z`;
+  }
+  if (hull.length === 2) {
+    // Capsule shape between 2 points
+    const [x1, y1] = hull[0];
+    const [x2, y2] = hull[1];
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    const nx = -dy / len * padding, ny = dx / len * padding;
+    return `M ${x1 + nx},${y1 + ny} L ${x2 + nx},${y2 + ny} A ${padding},${padding} 0 0,1 ${x2 - nx},${y2 - ny} L ${x1 - nx},${y1 - ny} A ${padding},${padding} 0 0,1 ${x1 + nx},${y1 + ny} Z`;
+  }
+  // Padded hull with rounded corners using cubic beziers
+  const cx = hull.reduce((s, p) => s + p[0], 0) / hull.length;
+  const cy = hull.reduce((s, p) => s + p[1], 0) / hull.length;
+  const expanded = hull.map(([x, y]) => {
+    const dx = x - cx, dy = y - cy;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    return [x + (dx / len) * padding, y + (dy / len) * padding] as [number, number];
+  });
+  const pts = expanded;
+  const n = pts.length;
+  let d = `M ${(pts[n - 1][0] + pts[0][0]) / 2},${(pts[n - 1][1] + pts[0][1]) / 2}`;
+  for (let i = 0; i < n; i++) {
+    const curr = pts[i];
+    const next = pts[(i + 1) % n];
+    const mx = (curr[0] + next[0]) / 2;
+    const my = (curr[1] + next[1]) / 2;
+    d += ` Q ${curr[0]},${curr[1]} ${mx},${my}`;
+  }
+  d += " Z";
+  return d;
+}
+
+// Pick a muted scope color distinct from type colors
+const SCOPE_COLORS = ["#7c8dac", "#9b8a6e", "#7a9e7a", "#b07a8a", "#8a7ab0", "#6e9b9b"];
+function scopeColor(idx: number): string {
+  return SCOPE_COLORS[idx % SCOPE_COLORS.length];
+}
+
 type GraphNode = SimulationNodeDatum & {
   slug: string;
   title: string;
   page_type: string;
+  scope_type?: string;
+  scope_name?: string | null;
   degree?: number;
 };
 
@@ -25,8 +93,17 @@ type GraphLink = SimulationLinkDatum<GraphNode> & {
   to: string;
 };
 
+type NodeInput = {
+  slug: string;
+  title: string;
+  page_type: string;
+  scope_type?: string;
+  scope_id?: string | null;
+  scope_name?: string | null;
+};
+
 type Props = {
-  nodes: { slug: string; title: string; page_type: string }[];
+  nodes: NodeInput[];
   edges: { from: string; to: string }[];
   centerSlug?: string;
   mini?: boolean;
@@ -65,9 +142,17 @@ export function WikiGraph({
     title: string;
     type: string;
     degree: number;
+    scopeType?: string;
+    scopeName?: string | null;
   } | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const simulationRef = React.useRef<any>(null);
+
+  // Zoom & pan state
+  const [zoom, setZoom] = React.useState(1);
+  const [pan, setPan] = React.useState({ x: 0, y: 0 });
+  const isPanningRef = React.useRef(false);
+  const panStartRef = React.useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
   // Measure container
   React.useEffect(() => {
@@ -82,7 +167,13 @@ export function WikiGraph({
     return () => obs.disconnect();
   }, [height]);
 
-  // Build simulation
+  // Persistent refs for simulation nodes/links (used in progressive/incremental mode)
+  const nodesRef = React.useRef<GraphNode[]>([]);
+  const linksRef = React.useRef<GraphLink[]>([]);
+  const knownSlugsRef = React.useRef<Set<string>>(new Set());
+  const prevRawNodesLenRef = React.useRef(0);
+
+  // Build / update simulation
   React.useEffect(() => {
     if (rawNodes.length === 0) return;
 
@@ -92,17 +183,97 @@ export function WikiGraph({
       degreeMap.set(e.to, (degreeMap.get(e.to) ?? 0) + 1);
     }
 
-    const nodes: GraphNode[] = rawNodes.map((n) => ({
-      ...n,
-      degree: degreeMap.get(n.slug) ?? 0,
-      fx: n.slug === centerSlug ? dimensions.w / 2 : undefined,
-      fy: n.slug === centerSlug ? dimensions.h / 2 : undefined,
-    }));
+    // Detect if this is a full data reset (new page / mini mode) vs incremental batch
+    const isFullReset = mini || rawNodes.length <= prevRawNodesLenRef.current;
+    if (isFullReset) {
+      // Full rebuild — clear refs
+      nodesRef.current = [];
+      linksRef.current = [];
+      knownSlugsRef.current.clear();
+    }
+    prevRawNodesLenRef.current = rawNodes.length;
 
-    const nodeBySlug = new Map(nodes.map((n) => [n.slug, n]));
-    const links: GraphLink[] = rawEdges
+    // Identify new nodes not already in the simulation
+    const newInputs = rawNodes.filter((n) => !knownSlugsRef.current.has(n.slug));
+    if (newInputs.length === 0 && simulationRef.current) {
+      // Only dimension change — update center force and reheat slightly
+      const centerForce = simulationRef.current.force("center") as ReturnType<typeof forceCenter> | undefined;
+      if (centerForce) {
+        centerForce.x(dimensions.w / 2).y(dimensions.h / 2);
+        simulationRef.current.alpha(0.1).restart();
+      }
+      return;
+    }
+
+    // Compute centroid of existing nodes (fallback to center)
+    const existing = nodesRef.current.filter((n) => n.x !== undefined);
+    const cx = existing.length > 0
+      ? existing.reduce((s, n) => s + n.x!, 0) / existing.length
+      : dimensions.w / 2;
+    const cy = existing.length > 0
+      ? existing.reduce((s, n) => s + n.y!, 0) / existing.length
+      : dimensions.h / 2;
+
+    // Create new GraphNode objects, positioned near neighbors or centroid
+    const nodeBySlug = new Map(nodesRef.current.map((n) => [n.slug, n]));
+    for (const n of newInputs) {
+      let spawnX = cx + (Math.random() - 0.5) * 60;
+      let spawnY = cy + (Math.random() - 0.5) * 60;
+
+      // Find a connected neighbor that already exists to spawn near it
+      for (const e of rawEdges) {
+        if (e.from === n.slug && nodeBySlug.has(e.to)) {
+          const neighbor = nodeBySlug.get(e.to)!;
+          if (neighbor.x !== undefined) {
+            spawnX = neighbor.x + (Math.random() - 0.5) * 40;
+            spawnY = neighbor.y! + (Math.random() - 0.5) * 40;
+            break;
+          }
+        }
+        if (e.to === n.slug && nodeBySlug.has(e.from)) {
+          const neighbor = nodeBySlug.get(e.from)!;
+          if (neighbor.x !== undefined) {
+            spawnX = neighbor.x + (Math.random() - 0.5) * 40;
+            spawnY = neighbor.y! + (Math.random() - 0.5) * 40;
+            break;
+          }
+        }
+      }
+
+      const node: GraphNode = {
+        slug: n.slug,
+        title: n.title,
+        page_type: n.page_type,
+        scope_type: n.scope_type,
+        scope_name: n.scope_name,
+        degree: degreeMap.get(n.slug) ?? 0,
+        x: spawnX,
+        y: spawnY,
+        fx: n.slug === centerSlug ? dimensions.w / 2 : undefined,
+        fy: n.slug === centerSlug ? dimensions.h / 2 : undefined,
+      };
+      nodesRef.current.push(node);
+      nodeBySlug.set(n.slug, node);
+      knownSlugsRef.current.add(n.slug);
+    }
+
+    // Update degree for all
+    for (const n of nodesRef.current) {
+      n.degree = degreeMap.get(n.slug) ?? 0;
+    }
+
+    // Rebuild links from ALL edges, only where both endpoints exist
+    linksRef.current = rawEdges
       .map((e) => ({ ...e, source: nodeBySlug.get(e.from)!, target: nodeBySlug.get(e.to)! }))
       .filter((l) => l.source && l.target);
+
+    const nodes = nodesRef.current;
+    const links = linksRef.current;
+
+    // Stop previous simulation if any
+    if (simulationRef.current) {
+      simulationRef.current.stop();
+    }
 
     const sim = forceSimulation<GraphNode>(nodes)
       .force(
@@ -115,7 +286,8 @@ export function WikiGraph({
       .force("charge", forceManyBody().strength(mini ? -60 : -120))
       .force("center", forceCenter(dimensions.w / 2, dimensions.h / 2).strength(0.05))
       .force("collide", forceCollide<GraphNode>((d) => nodeRadius(d.degree ?? 0, mini) + 4))
-      .alphaDecay(0.03);
+      .alphaDecay(0.03)
+      .alpha(isFullReset ? 1 : 0.3);
 
     sim.on("tick", () => {
       setSimNodes([...nodes]);
@@ -123,11 +295,17 @@ export function WikiGraph({
     });
 
     simulationRef.current = sim;
-
-    return () => {
-      sim.stop();
-    };
   }, [rawNodes, rawEdges, centerSlug, dimensions.w, dimensions.h, mini]);
+
+  // Cleanup on unmount
+  React.useEffect(() => {
+    return () => {
+      simulationRef.current?.stop();
+      nodesRef.current = [];
+      linksRef.current = [];
+      knownSlugsRef.current.clear();
+    };
+  }, []);
 
   // Neighbors of hovered node
   const neighborSlugs = React.useMemo(() => {
@@ -151,6 +329,41 @@ export function WikiGraph({
     return counts;
   }, [rawNodes]);
 
+  // Workspace scope hulls
+  const scopeHulls = React.useMemo(() => {
+    if (mini) return [];
+    const groups: Record<string, { nodes: GraphNode[]; scopeName: string }> = {};
+    for (const n of simNodes) {
+      if (n.scope_type !== "project" || n.x === undefined || n.y === undefined) continue;
+      const key = n.scope_name || "Workspace";
+      if (!groups[key]) groups[key] = { nodes: [], scopeName: key };
+      groups[key].nodes.push(n);
+    }
+    return Object.entries(groups)
+      .filter(([, g]) => g.nodes.length >= 1)
+      .map(([key, g], idx) => {
+        const points: [number, number][] = g.nodes.map((n) => [n.x!, n.y!]);
+        const hull = convexHull(points);
+        const padding = 30;
+        const path = hullToPath(hull, padding);
+        const cx = points.reduce((s, p) => s + p[0], 0) / points.length;
+        const cy = points.reduce((s, p) => s + p[1], 0) / points.length;
+        // Find topmost point for label
+        const topY = Math.min(...points.map((p) => p[1])) - padding - 6;
+        return { key, path, cx, labelY: topY, color: scopeColor(idx), scopeName: g.scopeName };
+      });
+  }, [simNodes, mini]);
+
+  // Scope counts for legend
+  const scopeCounts = React.useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const n of rawNodes) {
+      const label = n.scope_type === "project" ? (n.scope_name || "Workspace") : "Global";
+      counts[label] = (counts[label] ?? 0) + 1;
+    }
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  }, [rawNodes]);
+
   const handleNodeClick = (slug: string) => {
     if (onNodeClick) {
       onNodeClick(slug);
@@ -169,8 +382,66 @@ export function WikiGraph({
         ref={svgRef}
         width={dimensions.w}
         height={dimensions.h}
-        style={{ display: "block" }}
+        style={{ display: "block", cursor: isPanningRef.current ? "grabbing" : "grab" }}
+        onWheel={(e) => {
+          if (mini) return;
+          e.preventDefault();
+          const rect = svgRef.current?.getBoundingClientRect();
+          if (!rect) return;
+          const mx = e.clientX - rect.left;
+          const my = e.clientY - rect.top;
+          const factor = e.deltaY > 0 ? 0.9 : 1.1;
+          const newZoom = Math.max(0.2, Math.min(5, zoom * factor));
+          // Zoom toward cursor
+          setPan((prev) => ({
+            x: mx - (mx - prev.x) * (newZoom / zoom),
+            y: my - (my - prev.y) * (newZoom / zoom),
+          }));
+          setZoom(newZoom);
+        }}
+        onMouseDown={(e) => {
+          if (mini || e.button !== 0) return;
+          isPanningRef.current = true;
+          panStartRef.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
+        }}
+        onMouseMove={(e) => {
+          if (!isPanningRef.current) return;
+          setPan({
+            x: panStartRef.current.panX + (e.clientX - panStartRef.current.x),
+            y: panStartRef.current.panY + (e.clientY - panStartRef.current.y),
+          });
+        }}
+        onMouseUp={() => { isPanningRef.current = false; }}
+        onMouseLeave={() => { isPanningRef.current = false; }}
       >
+        <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
+        {/* Scope hull blobs — behind everything */}
+        {!mini && scopeHulls.map((hull) => (
+          <g key={`hull-${hull.key}`}>
+            <path
+              d={hull.path}
+              fill={`${hull.color}0a`}
+              stroke={hull.color}
+              strokeWidth={1}
+              strokeDasharray="6,4"
+              opacity={0.6}
+              style={{ transition: "d 200ms ease" }}
+            />
+            <text
+              x={hull.cx}
+              y={hull.labelY}
+              textAnchor="middle"
+              fill={hull.color}
+              fontSize={10}
+              fontWeight={600}
+              opacity={0.7}
+              style={{ pointerEvents: "none", userSelect: "none" }}
+            >
+              {hull.scopeName}
+            </text>
+          </g>
+        ))}
+
         {/* Edges */}
         <g>
           {simLinks.map((link, i) => {
@@ -224,6 +495,8 @@ export function WikiGraph({
                       title: node.title,
                       type: node.page_type,
                       degree: node.degree ?? 0,
+                      scopeType: node.scope_type,
+                      scopeName: node.scope_name,
                     });
                   }
                 }}
@@ -241,6 +514,7 @@ export function WikiGraph({
                     style={{ transition: "r 200ms ease" }}
                   />
                 )}
+
                 <circle
                   r={isHovered ? r * 1.3 : r}
                   fill={color}
@@ -272,6 +546,7 @@ export function WikiGraph({
             );
           })}
         </g>
+        </g>
       </svg>
 
       {/* Tooltip */}
@@ -297,12 +572,22 @@ export function WikiGraph({
             <span className="capitalize">{tooltip.type}</span>
             <span className="ml-auto">{tooltip.degree} links</span>
           </div>
+          {tooltip.scopeType && (
+            <div className="flex items-center gap-1.5 mt-1 pt-1 border-t border-border/50 text-muted-foreground">
+              <span className="material-symbols-outlined" style={{ fontSize: 11 }}>
+                {tooltip.scopeType === "project" ? "folder_special" : "public"}
+              </span>
+              <span className="truncate">
+                {tooltip.scopeType === "project" ? (tooltip.scopeName || "Workspace") : "Global"}
+              </span>
+            </div>
+          )}
         </div>
       )}
 
       {/* Legend */}
       {!mini && (
-        <div className="absolute bottom-3 left-3 rounded-xl border border-border bg-card/90 backdrop-blur-sm px-3 py-2.5 text-xs shadow-sm max-w-[220px]">
+        <div className="absolute bottom-3 left-3 rounded-xl border border-border bg-card/90 backdrop-blur-sm px-3 py-2.5 text-xs shadow-sm max-w-[240px]">
           <div className="mb-1.5 font-semibold text-foreground text-xs">Node Types</div>
           <div className="flex flex-col gap-1">
             {Object.entries(typeCounts)
@@ -327,6 +612,57 @@ export function WikiGraph({
                 </div>
               ))}
           </div>
+          {/* Scope legend */}
+          {scopeCounts.length > 0 && (
+            <>
+              <div className="mt-2 pt-2 border-t border-border/50 mb-1.5 font-semibold text-foreground text-xs">Scope</div>
+              <div className="flex flex-col gap-1">
+                {scopeCounts.map(([scope, count]) => (
+                  <div
+                    key={scope}
+                    className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-accent/30 transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-muted-foreground" style={{ fontSize: 12 }}>
+                      {scope === "Global" ? "public" : "folder_special"}
+                    </span>
+                    <span className="text-muted-foreground truncate">{scope}</span>
+                    <span className="text-muted-foreground/60 ml-auto tabular-nums">{count}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Zoom controls */}
+      {!mini && (
+        <div className="absolute bottom-3 right-3 flex flex-col items-center gap-1 rounded-xl border border-border bg-card/90 backdrop-blur-sm shadow-sm p-1">
+          <button
+            onClick={() => setZoom((z) => Math.min(5, z * 1.2))}
+            className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-accent/50 transition-colors text-muted-foreground hover:text-foreground"
+            title="Zoom In"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>add</span>
+          </button>
+          <span className="text-[9px] text-muted-foreground/60 tabular-nums font-medium select-none">
+            {Math.round(zoom * 100)}%
+          </span>
+          <button
+            onClick={() => setZoom((z) => Math.max(0.2, z / 1.2))}
+            className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-accent/50 transition-colors text-muted-foreground hover:text-foreground"
+            title="Zoom Out"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>remove</span>
+          </button>
+          <div className="w-5 border-t border-border/50" />
+          <button
+            onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
+            className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-accent/50 transition-colors text-muted-foreground hover:text-foreground"
+            title="Reset View"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>fit_screen</span>
+          </button>
         </div>
       )}
     </div>
@@ -339,7 +675,7 @@ export function WikiGraphMini({
   edges,
 }: {
   slug: string;
-  nodes: { slug: string; title: string; page_type: string }[];
+  nodes: NodeInput[];
   edges: { from: string; to: string }[];
 }) {
   return (

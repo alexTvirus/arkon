@@ -23,6 +23,9 @@ export type WikiGraphNode = {
   slug: string;
   title: string;
   page_type: string;
+  scope_type?: string;
+  scope_id?: string | null;
+  scope_name?: string | null;
   // injected by d3-force simulation
   x?: number;
   y?: number;
@@ -43,4 +46,7 @@ export type WikiGraphEdge = {
 export type WikiGraphData = {
   nodes: WikiGraphNode[];
   edges: WikiGraphEdge[];
+  total?: number;
+  offset?: number;
+  has_more?: boolean;
 };

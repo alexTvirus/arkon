@@ -1,33 +1,48 @@
 "use client";
 
-import React from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+
+/* ─── Types ─── */
 
 type NavItem = {
   label: string;
   href: string;
   icon: string;
-  /** If set, user must have at least one of these permissions to see this item */
   requiredPermissions?: string[];
 };
 
-type NavGroup = {
+type NavSection = {
   id: string;
   label: string;
-  icon: string;
-  /** If set, user must have at least one of these permissions to see this group */
   requiredPermissions?: string[];
   items: NavItem[];
 };
 
-const navGroups: NavGroup[] = [
+type WorkspaceItem = {
+  id: string;
+  name: string;
+  workspace_type: string;
+  status: string;
+};
+
+/* ─── Navigation Config ─── */
+
+const navSections: NavSection[] = [
   {
     id: "org-knowledge",
     label: "Org Knowledge",
-    icon: "corporate_fare",
     items: [
       { label: "Documents", href: "/knowledge", icon: "description", requiredPermissions: ["documents.read"] },
       { label: "Wiki", href: "/wiki", icon: "auto_stories", requiredPermissions: ["kb.read"] },
@@ -36,7 +51,6 @@ const navGroups: NavGroup[] = [
   {
     id: "organization",
     label: "Organization",
-    icon: "account_tree",
     requiredPermissions: ["departments.read", "employees.read", "roles.read"],
     items: [
       { label: "Departments", href: "/departments", icon: "domain", requiredPermissions: ["departments.read"] },
@@ -47,7 +61,6 @@ const navGroups: NavGroup[] = [
   {
     id: "system",
     label: "System",
-    icon: "tune",
     requiredPermissions: ["audit.read", "settings.read"],
     items: [
       { label: "Audit Log", href: "/audit", icon: "policy", requiredPermissions: ["audit.read"] },
@@ -56,7 +69,9 @@ const navGroups: NavGroup[] = [
   },
 ];
 
-function useCollapsed(groupId: string, defaultOpen: boolean) {
+/* ─── Hooks ─── */
+
+function useGroupToggle(groupId: string, defaultOpen: boolean) {
   const key = `sidebar-group-${groupId}`;
   const [open, setOpen] = React.useState(() => {
     if (typeof window === "undefined") return defaultOpen;
@@ -74,171 +89,332 @@ function useCollapsed(groupId: string, defaultOpen: boolean) {
   return [open, toggle] as const;
 }
 
-function NavGroupSection({
-  group,
+/* ─── Helpers ─── */
+
+function isActive(href: string, pathname: string) {
+  return href === "/" ? pathname === "/" : pathname.startsWith(href);
+}
+
+/** Pick a color for workspace icon based on workspace type */
+function workspaceColor(type: string): string {
+  const colors: Record<string, string> = {
+    internal: "#c2652a",
+    customer: "#2a7ec2",
+    partner: "#2ac265",
+  };
+  return colors[type] || "#78706a";
+}
+
+/* ─── Sub-components ─── */
+
+function SidebarNavItem({
+  item,
+  pathname,
+  indented = false,
+}: {
+  item: NavItem;
+  pathname: string;
+  indented?: boolean;
+}) {
+  const active = isActive(item.href, pathname);
+
+  return (
+    <Link
+      href={item.href}
+      className={cn(
+        "group relative flex items-center gap-2 rounded-md px-2 py-[5px] text-[13px] transition-colors duration-100",
+        indented && "ml-3",
+        active
+          ? "bg-black/[0.04] font-semibold text-foreground"
+          : "text-muted-foreground hover:bg-black/[0.03] hover:text-foreground"
+      )}
+    >
+      <span
+        className={cn(
+          "material-symbols-outlined text-[18px] shrink-0",
+          active ? "filled text-foreground" : "text-muted-foreground/70 group-hover:text-muted-foreground"
+        )}
+        style={{ fontVariationSettings: active ? "'FILL' 1, 'wght' 300, 'GRAD' 0, 'opsz' 20" : "'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 20" }}
+      >
+        {item.icon}
+      </span>
+      <span className="truncate">{item.label}</span>
+    </Link>
+  );
+}
+
+/** Static section — always expanded, no toggle */
+function SidebarStaticSection({
+  section,
   hasPermission,
   pathname,
 }: {
-  group: NavGroup;
+  section: NavSection;
   hasPermission: (perm: string) => boolean;
   pathname: string;
 }) {
-  const visibleItems = group.items.filter((i) => {
+  const visibleItems = section.items.filter((i) => {
     if (!i.requiredPermissions) return true;
     return i.requiredPermissions.some((p) => hasPermission(p));
   });
   if (visibleItems.length === 0) return null;
 
-  const hasActive = visibleItems.some((i) =>
-    i.href === "/" ? pathname === "/" : pathname.startsWith(i.href)
-  );
+  return (
+    <div className="mt-4 first:mt-0">
+      {/* Section label */}
+      <div className="px-2 py-[3px] text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+        {section.label}
+      </div>
 
-  const [open, toggle] = useCollapsed(group.id, true);
-  // Force open if a child is active
-  const isOpen = open || hasActive;
+      {/* Items — always visible */}
+      <div className="mt-[2px] space-y-[1px]">
+        {visibleItems.map((item) => (
+          <SidebarNavItem key={item.href} item={item} pathname={pathname} indented />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Workspaces section — collapsible, fetches workspace list */
+function SidebarWorkspacesSection({
+  pathname,
+  canCreate,
+}: {
+  pathname: string;
+  canCreate: boolean;
+}) {
+  const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [open, toggle] = useGroupToggle("workspaces", true);
+
+  useEffect(() => {
+    api<WorkspaceItem[]>("/api/projects")
+      .then((data) => setWorkspaces(data))
+      .catch(() => setWorkspaces([]))
+      .finally(() => setLoaded(true));
+  }, []);
+
+  const SIDEBAR_LIMIT = 10;
+  const hasActiveChild = workspaces.some((w) =>
+    pathname.startsWith(`/workspaces`) && pathname.includes(w.id)
+  );
+  const isOpen = open || hasActiveChild;
+  const displayedWorkspaces = workspaces.slice(0, SIDEBAR_LIMIT);
+  const hasMore = workspaces.length > SIDEBAR_LIMIT;
+  const itemCount = displayedWorkspaces.length + (hasMore ? 1 : 0);
 
   return (
-    <div>
-      {/* Group header */}
-      <button
-        onClick={toggle}
-        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/40 transition-all duration-150"
-      >
-        <span className="material-symbols-outlined text-base">{group.icon}</span>
-        <span className="flex-1 text-left">{group.label}</span>
-        <span
-          className="material-symbols-outlined text-sm transition-transform duration-200"
-          style={{ transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)" }}
+    <div className="mt-4">
+      {/* Section header — collapsible + create button */}
+      <div className="group/ws flex items-center">
+        <button
+          onClick={toggle}
+          className="flex flex-1 items-center gap-1 px-2 py-[3px] text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/60 group-hover/ws:text-muted-foreground transition-colors duration-100"
         >
-          expand_more
-        </span>
-      </button>
+          <span>Workspaces</span>
+          <span
+            className="material-symbols-outlined text-[14px] transition-all duration-150 opacity-0 group-hover/ws:opacity-100"
+            style={{
+              transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)",
+              fontVariationSettings: "'FILL' 0, 'wght' 500, 'GRAD' 0, 'opsz' 14",
+            }}
+          >
+            expand_more
+          </span>
+        </button>
+        {canCreate && (
+          <Link
+            href="/?new=1"
+            className="shrink-0 w-5 h-5 flex items-center justify-center rounded text-muted-foreground/40 hover:bg-black/[0.04] hover:text-muted-foreground transition-all duration-100 opacity-0 group-hover/ws:opacity-100 mr-1"
+            title="New Workspace"
+          >
+            <span
+              className="material-symbols-outlined text-[16px]"
+              style={{ fontVariationSettings: "'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 16" }}
+            >
+              add
+            </span>
+          </Link>
+        )}
+      </div>
 
-      {/* Items */}
+      {/* Workspace items */}
       <div
-        className="overflow-hidden transition-all duration-200"
-        style={{ maxHeight: isOpen ? `${visibleItems.length * 44}px` : "0px" }}
+        className="overflow-hidden transition-all duration-200 ease-out"
+        style={{
+          maxHeight: isOpen ? `${Math.max(itemCount, 1) * 32 + 8}px` : "0px",
+          opacity: isOpen ? 1 : 0,
+        }}
       >
-        <div className="ml-3 mt-0.5 mb-1 space-y-0.5">
-          {visibleItems.map((item) => {
-            const isActive =
-              item.href === "/"
-                ? pathname === "/"
-                : pathname.startsWith(item.href);
+        <div className="mt-[2px] space-y-[1px]">
+          {!loaded ? (
+            <div className="flex items-center gap-2 ml-3 px-2 py-[5px]">
+              <span className="material-symbols-outlined text-[14px] text-muted-foreground/40 animate-spin">
+                progress_activity
+              </span>
+              <span className="text-[12px] text-muted-foreground/40">Loading…</span>
+            </div>
+          ) : workspaces.length === 0 ? (
+            <div className="ml-3 px-2 py-[5px] text-[12px] text-muted-foreground/40">
+              No workspaces
+            </div>
+          ) : (
+            <>
+              {displayedWorkspaces.map((ws) => {
+                const href = `/workspaces/${ws.id}`;
+                const active = pathname === href;
 
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150",
-                  isActive
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold translate-x-0.5"
-                    : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground"
-                )}
-              >
-                <span
-                  className={cn("material-symbols-outlined text-lg", isActive && "filled")}
+                return (
+                  <Link
+                    key={ws.id}
+                    href={href}
+                    className={cn(
+                      "group relative flex items-center gap-2 rounded-md ml-3 px-2 py-[5px] text-[13px] transition-colors duration-100",
+                      active
+                        ? "bg-black/[0.04] font-semibold text-foreground"
+                        : "text-muted-foreground hover:bg-black/[0.03] hover:text-foreground"
+                    )}
+                  >
+                    <span
+                      className="w-[8px] h-[8px] rounded-[2px] shrink-0"
+                      style={{ backgroundColor: workspaceColor(ws.workspace_type) }}
+                    />
+                    <span className="truncate">{ws.name}</span>
+                  </Link>
+                );
+              })}
+              {hasMore && (
+                <Link
+                  href="/"
+                  className="flex items-center gap-2 ml-3 px-2 py-[5px] text-[12px] text-muted-foreground/50 hover:text-muted-foreground transition-colors duration-100"
                 >
-                  {item.icon}
-                </span>
-                {item.label}
-              </Link>
-            );
-          })}
+                  <span className="material-symbols-outlined text-[14px]">more_horiz</span>
+                  <span>{workspaces.length - SIDEBAR_LIMIT} more…</span>
+                </Link>
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
+function OrgHeader({
+  user,
+}: {
+  user: { name: string; role: string } | null;
+}) {
+  const router = useRouter();
+  const { logout } = useAuth();
+
+  const handleLogout = () => {
+    logout();
+    router.push("/login");
+  };
+
+  return (
+    <div className="px-2 py-1 mb-1">
+      <DropdownMenu>
+        <DropdownMenuTrigger className="flex items-center gap-2.5 rounded-md px-1.5 py-1.5 hover:bg-black/[0.03] transition-colors cursor-pointer min-w-0 w-full">
+          <div className="w-[22px] h-[22px] rounded-[5px] bg-primary/90 flex items-center justify-center text-white text-[11px] font-bold shrink-0">
+            A
+          </div>
+          <div className="flex flex-col items-start min-w-0">
+            <span className="text-[13px] font-semibold text-foreground truncate leading-tight">
+              Arkon
+            </span>
+            {user && (
+              <span className="text-[10px] text-muted-foreground/70 truncate leading-tight">
+                {user.name} · {user.role}
+              </span>
+            )}
+          </div>
+          <span className="material-symbols-outlined text-[14px] text-muted-foreground/50 ml-auto shrink-0">
+            unfold_more
+          </span>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-56">
+          {user && (
+            <>
+              <div className="px-3 py-2">
+                <p className="text-sm font-medium">{user.name}</p>
+                <p className="text-xs text-muted-foreground capitalize">{user.role}</p>
+              </div>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          <DropdownMenuItem onClick={() => router.push("/profile")}>
+            <span className="material-symbols-outlined mr-2 text-base">person</span>
+            Profile
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => router.push("/settings")}>
+            <span className="material-symbols-outlined mr-2 text-base">settings</span>
+            Settings
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={handleLogout} className="text-destructive">
+            <span className="material-symbols-outlined mr-2 text-base">logout</span>
+            Sign out
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+/* ─── Main Sidebar ─── */
+
 export function Sidebar() {
   const pathname = usePathname();
   const { user, hasPermission } = useAuth();
 
-  const visibleGroups = navGroups.filter((g) => {
-    if (!g.requiredPermissions) return true;
-    return g.requiredPermissions.some((p) => hasPermission(p));
+  const visibleSections = navSections.filter((s) => {
+    if (!s.requiredPermissions) return true;
+    return s.requiredPermissions.some((p) => hasPermission(p));
   });
 
   return (
-    <nav className="hidden md:flex fixed left-0 top-0 h-full w-60 border-r border-border bg-sidebar flex-col gap-1 p-4 z-40">
-      {/* Brand */}
-      <div className="mb-5 px-3">
-        <Link href="/">
-          <h1 className="text-xl font-heading text-primary tracking-tight">
-            Arkon
-          </h1>
-        </Link>
+    <nav className="hidden md:flex flex-col h-full w-[240px] shrink-0 bg-[#f7f5f2] border-r border-black/[0.04]">
+      {/* Org Header + User */}
+      <div className="pt-2">
+        <OrgHeader user={user} />
       </div>
 
-      {/* Dashboard — standalone */}
-      <Link
-        href="/"
-        className={cn(
-          "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150 mb-2",
-          pathname === "/"
-            ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold translate-x-0.5"
-            : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground"
+      {/* Divider */}
+      <div className="mx-3 border-t border-black/[0.04] my-1" />
+
+      {/* Navigation */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-1 sidebar-scrollbar">
+        {/* Dashboard */}
+        <SidebarNavItem
+          item={{ label: "Dashboard", href: "/", icon: "dashboard" }}
+          pathname={pathname}
+        />
+
+        {/* Workspaces — collapsible, inline list */}
+        {hasPermission("workspaces.read") && (
+          <SidebarWorkspacesSection pathname={pathname} canCreate={hasPermission("workspaces.create")} />
         )}
-      >
-        <span className={cn("material-symbols-outlined text-lg", pathname === "/" && "filled")}>
-          dashboard
-        </span>
-        Dashboard
-      </Link>
 
-      {/* Workspaces — standalone */}
-      {hasPermission("workspaces.read") && (
-        <Link
-          href="/workspaces"
-          className={cn(
-            "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150 mb-2",
-            pathname.startsWith("/workspaces")
-              ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold translate-x-0.5"
-              : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground"
-          )}
-        >
-          <span className={cn("material-symbols-outlined text-lg", pathname.startsWith("/workspaces") && "filled")}>
-            folder_special
-          </span>
-          Workspaces
-        </Link>
-      )}
-
-      {/* Grouped sections */}
-      <div className="flex flex-col gap-1 flex-1 overflow-y-auto">
-        {visibleGroups.map((group) => (
-          <NavGroupSection
-            key={group.id}
-            group={group}
+        {/* Static sections — no collapse */}
+        {visibleSections.map((section) => (
+          <SidebarStaticSection
+            key={section.id}
+            section={section}
             hasPermission={hasPermission}
             pathname={pathname}
           />
         ))}
       </div>
 
-      {/* User info */}
-      {user && (
-        <div className="mt-2 pt-4 border-t border-border">
-          <Link
-            href="/profile"
-            className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-sidebar-accent/50 transition-colors"
-          >
-            <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary text-xs font-bold shrink-0">
-              {user.name.charAt(0).toUpperCase()}
-            </div>
-            <div className="flex flex-col min-w-0">
-              <span className="text-sm font-medium text-foreground truncate">
-                {user.name}
-              </span>
-              <span className="text-xs text-muted-foreground capitalize">
-                {user.role}
-              </span>
-            </div>
-          </Link>
-        </div>
-      )}
+      {/* Bottom meta */}
+      <div className="px-3 py-2 border-t border-black/[0.04]">
+        <span className="text-[10px] text-muted-foreground/40 font-medium">
+          On-Premise · Internal
+        </span>
+      </div>
     </nav>
   );
 }
