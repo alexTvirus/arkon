@@ -14,10 +14,16 @@ RUN pip install --upgrade pip --no-cache-dir
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir .
 
-# Copy application source
+# Copy application source and migration files
 COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
+
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
+ENTRYPOINT ["./entrypoint.sh"]
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5055"]

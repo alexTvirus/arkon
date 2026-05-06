@@ -26,5 +26,3 @@ frontend/
 *.md
 docs/
 
-# Alembic (migrations run separately)
-alembic/
