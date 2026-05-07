@@ -11,23 +11,22 @@ from datetime import datetime
 from enum import Enum as PyEnum
 from typing import Optional
 
-from pgvector.sqlalchemy import Vector
-import sqlalchemy as sa
+from pgvector.sqlalchemy import HALFVEC, Vector
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     PrimaryKeyConstraint,
     String,
     Text,
-    Integer,
-    Boolean,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID, ENUM as PgEnum
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -146,6 +145,38 @@ class SourceDepartment(Base):
     department: Mapped["Department"] = relationship(back_populates="source_departments")
 
 
+class SourceImage(Base):
+    """An image extracted from a source document during ingestion.
+
+    Wiki pages reference these by id via `image://<uuid>` markers in content_md.
+    The wiki compiler decides which page each image belongs to based on context.
+    """
+    __tablename__ = "source_images"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sources.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    minio_key: Mapped[str] = mapped_column(Text, nullable=False)
+    page_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    image_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    caption: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "image_index", name="uq_source_images_source_idx"),
+    )
+
+    source: Mapped["Source"] = relationship()
+
+
 # ---------------------------------------------------------------------------
 # Wiki — LLM-compiled persistent knowledge layer
 # ---------------------------------------------------------------------------
@@ -180,7 +211,9 @@ class WikiPage(Base):
     source_ids: Mapped[list[uuid.UUID]] = mapped_column(
         ARRAY(UUID(as_uuid=True)), nullable=False, default=list,
     )
-    embedding = mapped_column(Vector(768), nullable=True)
+    # Embeddings live in per-dimension tables (wiki_page_embeddings_<dim>) so
+    # different embedding models with different output sizes can coexist.
+    # See app/ai/embedding_catalog.py and migration 015.
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     orphaned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -721,4 +754,96 @@ class AuditLog(Base):
         Index("ix_audit_log_timestamp", "timestamp"),
         Index("ix_audit_log_principal", "principal_id"),
         Index("ix_audit_log_resource", "resource_type", "resource_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-dimension wiki page embeddings
+# ---------------------------------------------------------------------------
+# One table per supported output dimension. The active embedding model spec
+# (stored in app_config.active_embedding_model_spec_id) determines which table
+# search & ingestion read/write. See app/ai/embedding_catalog.py.
+
+class _WikiPageEmbeddingBase:
+    """Mixin: shared columns for all wiki_page_embeddings_<dim> tables."""
+
+    page_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("wiki_pages.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    model_spec_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class WikiPageEmbedding768(_WikiPageEmbeddingBase, Base):
+    __tablename__ = "wiki_page_embeddings_768"
+    embedding = mapped_column(Vector(768), nullable=False)
+
+
+class WikiPageEmbedding1024(_WikiPageEmbeddingBase, Base):
+    __tablename__ = "wiki_page_embeddings_1024"
+    embedding = mapped_column(Vector(1024), nullable=False)
+
+
+class WikiPageEmbedding1536(_WikiPageEmbeddingBase, Base):
+    __tablename__ = "wiki_page_embeddings_1536"
+    embedding = mapped_column(Vector(1536), nullable=False)
+
+
+class WikiPageEmbedding3072(_WikiPageEmbeddingBase, Base):
+    # 3072d uses halfvec — pgvector's HNSW index caps `vector` at 2000 dims.
+    __tablename__ = "wiki_page_embeddings_3072"
+    embedding = mapped_column(HALFVEC(3072), nullable=False)
+
+
+_EMBEDDING_MODEL_BY_DIM: dict[int, type] = {
+    768: WikiPageEmbedding768,
+    1024: WikiPageEmbedding1024,
+    1536: WikiPageEmbedding1536,
+    3072: WikiPageEmbedding3072,
+}
+
+
+def get_embedding_model_for_dim(dimension: int) -> type:
+    """Return the WikiPageEmbedding<dim> ORM class for a supported dimension."""
+    try:
+        return _EMBEDDING_MODEL_BY_DIM[dimension]
+    except KeyError as e:
+        raise ValueError(
+            f"Unsupported embedding dimension: {dimension}. "
+            f"Supported: {sorted(_EMBEDDING_MODEL_BY_DIM)}"
+        ) from e
+
+
+class EmbeddingJob(Base):
+    """Tracks a background re-embed job triggered when admin switches model."""
+
+    __tablename__ = "embedding_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    model_spec_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending"
+    )  # pending | running | completed | failed | cancelled
+    total_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    done_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_embedding_jobs_status", "status", "created_at"),
     )

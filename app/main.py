@@ -12,7 +12,6 @@ from loguru import logger
 from app.config import settings
 from app.mcp.server import create_mcp_server
 
-
 # Create the MCP server and its HTTP app (lifespan must be composed with FastAPI)
 mcp_server = create_mcp_server()
 mcp_http_app = mcp_server.http_app(path="/", stateless_http=True)
@@ -21,6 +20,7 @@ mcp_http_app = mcp_server.http_app(path="/", stateless_http=True)
 async def seed_default_admin():
     """Create default admin account from .env if no admin exists yet."""
     from sqlalchemy import select
+
     from app.database import async_session_factory
     from app.database.models import Department, Employee
     from app.services.auth_service import hash_password
@@ -108,14 +108,31 @@ app.add_middleware(
 app.mount("/mcp", mcp_http_app)
 
 # --- REST API Routers ---
-from app.routers import sources, notes, auth, admin_settings, rbac, knowledge_types, projects, roles, wiki, wiki_drafts, audit, skills  # noqa: E402
+from app.routers import (  # noqa: E402
+    admin_embeddings,
+    admin_settings,
+    audit,
+    auth,
+    knowledge_types,
+    notes,
+    projects,
+    rbac,
+    roles,
+    skills,
+    sources,
+    wiki,
+    wiki_drafts,
+    wiki_images,
+)
 
 app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
 app.include_router(notes.router, prefix="/api", tags=["notes"])
 app.include_router(wiki_drafts.router, prefix="/api", tags=["wiki-drafts"])
 app.include_router(wiki.router, prefix="/api", tags=["wiki"])
+app.include_router(wiki_images.router, prefix="/api", tags=["wiki"])
 app.include_router(admin_settings.router, prefix="/api", tags=["settings"])
+app.include_router(admin_embeddings.router, prefix="/api", tags=["settings"])
 app.include_router(rbac.router, prefix="/api", tags=["rbac"])
 app.include_router(knowledge_types.router, prefix="/api", tags=["knowledge-types"])
 app.include_router(projects.router, prefix="/api", tags=["projects"])
@@ -143,6 +160,7 @@ async def health():
     # Database
     try:
         from sqlalchemy import text
+
         from app.database import async_session_factory
         async with async_session_factory() as session:
             await session.execute(text("SELECT 1"))
@@ -179,8 +197,9 @@ async def health():
 @app.get("/api/health")
 async def api_health():
     """Detailed health check for API, database, and worker (Redis)."""
-    from app.database import async_session_factory
     from sqlalchemy import text
+
+    from app.database import async_session_factory
 
     result = {
         "api": "healthy",

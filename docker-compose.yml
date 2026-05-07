@@ -6,11 +6,73 @@ x-backend: &backend
     context: .
     dockerfile: Dockerfile
   image: arkon-backend:latest
-  env_file: [.env]
+  env_file: [.env.docker]
   restart: always
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
 
 services:
-  # 1. API
+  # ── Infrastructure ────────────────────────────────────────────
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: arkon_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: arkon
+      POSTGRES_PASSWORD: arkon_secret
+      POSTGRES_DB: arkon
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arkon -d arkon"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: arkon_redis
+    restart: always
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: arkon_minio
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin123}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── Application ───────────────────────────────────────────────
+
   api:
     <<: *backend
     container_name: arkon_api
@@ -23,9 +85,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 30s
 
-  # 2. Background worker (main queue)
   worker:
     <<: *backend
     container_name: arkon_worker
@@ -34,7 +95,6 @@ services:
       api:
         condition: service_healthy
 
-  # 3. Background worker (skills queue)
   worker_skills:
     <<: *backend
     container_name: arkon_worker_skills
@@ -43,7 +103,6 @@ services:
       api:
         condition: service_healthy
 
-  # 4. Frontend (Next.js standalone)
   frontend:
     build:
       context: ./frontend
@@ -61,3 +120,8 @@ services:
     depends_on:
       api:
         condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

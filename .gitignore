@@ -23,6 +23,7 @@ ENV/
 # Environment
 .env
 .env.local
+.env.docker
 
 # Docker volumes
 pg_data/

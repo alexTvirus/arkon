@@ -4,7 +4,7 @@ MinIO storage service — file upload, download, presigned URLs.
 
 import io
 from datetime import timedelta
-from typing import Optional
+from typing import IO, Optional
 
 from loguru import logger
 from minio import Minio
@@ -76,7 +76,7 @@ class StorageService:
     def upload_stream(
         self,
         object_name: str,
-        stream: io.IOBase,
+        stream: IO[bytes],
         length: int,
         content_type: str = "application/octet-stream",
     ) -> str:
@@ -94,7 +94,7 @@ class StorageService:
     async def upload_stream_async(
         self,
         object_name: str,
-        stream: io.IOBase,
+        stream: IO[bytes],
         length: int,
         content_type: str = "application/octet-stream",
     ) -> str:

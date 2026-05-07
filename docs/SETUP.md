@@ -16,10 +16,12 @@ Two ways to run Arkon: **Docker** (recommended for production) or **Development*
 ```bash
 git clone https://github.com/nduckmink/arkon.git
 cd arkon
-cp .env.example .env
+cp .env.docker.example .env.docker
 ```
 
-Edit `.env`:
+> Arkon ships **two** env templates: `.env.docker.example` for `docker compose`, and `.env.local.example` for local development (Option B). They differ only in service hostnames (container names vs. `localhost`).
+
+Edit `.env.docker`:
 
 ```env
 # Required: generate a strong random secret
@@ -39,7 +41,7 @@ CORS_ORIGINS=https://your-domain.com
 NEXT_PUBLIC_API_URL=https://your-domain.com
 ```
 
-> The full `.env.example` documents every available variable.
+> The full `.env.docker.example` documents every available variable.
 
 ### 2. Start
 
@@ -61,7 +63,7 @@ Workers start only after `arkon_api` passes its health check, so there is no rac
 
 ### 3. First login
 
-Open **http://your-server:3119** and log in with the credentials from `.env`.
+Open **http://your-server:3119** and log in with the credentials from `.env.docker`.
 
 ### 4. Configure AI providers
 
@@ -127,10 +129,10 @@ docker run -d --name arkon-minio \
 ### 2. Configure environment
 
 ```bash
-cp .env.example .env
+cp .env.local.example .env.local
 ```
 
-For local development, the defaults in `.env.example` work out of the box except:
+For local development, the defaults in `.env.local.example` work out of the box except:
 
 ```env
 SECRET_KEY=dev-only-not-for-production
@@ -249,7 +251,7 @@ See [MCP & Claude](MCP.md) for the connection guide.
 | `NEXT_PUBLIC_API_URL` | `http://localhost:5055` | Public API URL (used by the browser) |
 | `INTERNAL_API_URL` | `http://api:5055` | Internal API URL used by the Next.js server for proxying (Docker only) |
 
-AI provider settings (embedding, LLM, vision, API keys) are configured through the Admin Portal → Settings, not in `.env`.
+AI provider settings (embedding, LLM, vision, API keys) are configured through the Admin Portal → Settings, not in env files.
 
 ---
 
@@ -262,6 +264,6 @@ AI provider settings (embedding, LLM, vision, API keys) are configured through t
 | Documents stuck at `pending` | Wiki worker not running |
 | Wiki pages not created after upload | Check LLM config in Settings; check worker logs |
 | Frontend shows API error | Backend not running, or `NEXT_PUBLIC_API_URL` incorrect |
-| CORS errors in browser | Add frontend URL to `CORS_ORIGINS` in `.env` |
+| CORS errors in browser | Add frontend URL to `CORS_ORIGINS` in `.env.docker` (or `.env.local` for dev) |
 | `requires Python 3.11` | Use `py -3.11 -m venv .venv` to select correct version |
 | MCP connection refused | Ensure the API is accessible from outside (check firewall/proxy) |

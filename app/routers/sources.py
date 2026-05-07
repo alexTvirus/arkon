@@ -13,19 +13,23 @@ from arq.connections import ArqRedis, create_pool
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import delete as sql_delete, func, select, or_, exists
+from sqlalchemy import delete as sql_delete
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.database.models import Employee, Source, SourceDepartment, ScopeType, WikiPage
+from app.database.models import Employee, ScopeType, Source, SourceDepartment, WikiPage
 from app.database.repository import Repository
-from app.services.auth_service import require_admin, require_permission, get_current_user
+from app.services.audit_service import log_audit
+from app.services.auth_service import (
+    get_current_user,
+    require_permission,
+)
 from app.services.permission_engine import (
     _get_user_permissions,
     get_scope_level,
 )
-from app.services.audit_service import log_audit
 
 router = APIRouter()
 
@@ -350,8 +354,8 @@ async def upload_source(
     await db.refresh(source)
 
     # Upload to MinIO before enqueuing so the worker downloads from storage
-    from app.services.storage_service import storage_service
     from app.services.kb_service import _guess_content_type
+    from app.services.storage_service import storage_service
     minio_key = f"sources/{source.id}/original/{file_name}"
     storage_service.upload_file(
         object_name=minio_key,
@@ -463,18 +467,17 @@ async def update_source(
     return _to_response(source, await _wiki_page_count(db, source_id))
 
 
-@router.post("/sources/{source_id}/recompile", response_model=SourceResponse)
-async def recompile_source(
+@router.post("/sources/{source_id}/retry", response_model=SourceResponse)
+async def retry_source(
     source_id: uuid.UUID,
-    force: bool = Query(False, description="If true, detach this source from existing wiki pages first"),
     db: AsyncSession = Depends(get_db),
     _user: Employee = require_permission("doc:edit"),
 ):
     """
-    Re-run the wiki compiler for this source. Without `force`, the compiler
-    merges new ops into the existing wiki state. With `force=True`, the
-    source is first detached from all wiki pages (orphans deleted) so the
-    wiki effectively starts fresh from this source's perspective.
+    Retry ingestion for a source whose previous attempt failed.
+
+    Only allowed when the source is in `error` status — successful sources
+    cannot be re-ingested.
     """
     source = (await db.execute(
         select(Source)
@@ -483,22 +486,22 @@ async def recompile_source(
     )).scalar_one_or_none()
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
+    if source.status != "error":
+        raise HTTPException(status_code=400, detail="Retry is only allowed for sources in error status")
     if source.source_type == "url" and not source.url:
-        raise HTTPException(status_code=400, detail="Source has no URL to recompile")
+        raise HTTPException(status_code=400, detail="Source has no URL to retry")
     if source.source_type == "file" and not source.minio_key:
         raise HTTPException(status_code=400, detail="Source file not found in storage")
 
     source.status = "pending"
     source.progress = 0
-    source.progress_message = "Queued for recompile..."
+    source.progress_message = "Queued for retry..."
     source.error_message = None
     await db.flush()
 
     pool = await get_arq_pool()
-    if source.source_type == "url":
-        job = await pool.enqueue_job("ingest_url_task", str(source_id))
-    else:
-        job = await pool.enqueue_job("reingest_file_task", str(source_id), force)
+    task_name = "ingest_url_task" if source.source_type == "url" else "ingest_file_task"
+    job = await pool.enqueue_job(task_name, str(source_id))
 
     source.job_id = job.job_id
     await db.commit()
@@ -509,7 +512,7 @@ async def recompile_source(
         .options(*_source_load_options())
         .where(Source.id == source_id)
     )).scalar_one()
-    logger.info(f"Queued recompile job {job.job_id} for source {source_id} (force={force})")
+    logger.info(f"Queued retry job {job.job_id} for source {source_id}")
     return _to_response(source)
 
 
@@ -530,10 +533,14 @@ async def delete_source(
     except Exception as e:
         logger.warning(f"Failed to clean MinIO files for source {source_id}: {e}")
 
-    # Detach from wiki — orphan pages are removed, then rebuild index.
+    # Detach from wiki — single-source pages are deleted, then rebuild index.
     from app.services import wiki_service
     await wiki_service.detach_source_from_wiki(db, source_id)
-    await wiki_service.regenerate_index(db)
+    await wiki_service.regenerate_index(
+        db,
+        scope_type=source.scope_type or "global",
+        scope_id=source.scope_id,
+    )
 
     await log_audit(db, _user, "delete", "source", str(source.id), reason=source.title)
     await repo.delete_by_id(Source, source_id)

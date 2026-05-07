@@ -71,10 +71,10 @@ Fine-grained RBAC at department level plus workspace membership roles. Admins de
 ```bash
 git clone https://github.com/nduckmink/arkon.git
 cd arkon
-cp .env.example .env
+cp .env.docker.example .env.docker
 ```
 
-Edit `.env` - set at minimum:
+Edit `.env.docker` - set at minimum:
 
 ```env
 SECRET_KEY=<run: python -c "import secrets; print(secrets.token_urlsafe(32))">
@@ -142,6 +142,7 @@ Add this to `claude_desktop_config.json` and restart Claude Desktop. The employe
 - [x] AI Skills - versioned, department-scoped agent packages
 - [x] Full RBAC - department permissions + workspace membership roles
 - [x] Audit log
+- [ ] Regex Search for Human and AI
 - [ ] Arkon CLI - one-command employee setup
 - [ ] Notification system for draft review requests
 - [ ] Usage analytics dashboard

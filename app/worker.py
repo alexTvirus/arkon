@@ -8,13 +8,13 @@ Start with:
     arq app.worker.WorkerSettings
 """
 
-import io
+import asyncio
 import uuid
 import zipfile
-from typing import Callable, Optional
+from typing import Optional
 
 from arq import cron
-from arq.connections import RedisSettings, ArqRedis, create_pool
+from arq.connections import ArqRedis, RedisSettings, create_pool
 from loguru import logger
 
 from app.config import settings
@@ -73,17 +73,17 @@ async def ingest_file_task(ctx: dict, source_id: str):
     Steps: download from MinIO → extract text → vision captions → outline → compile wiki.
     File must already be uploaded to MinIO before this task is enqueued.
     """
-    from app.database import async_session_factory
-    from app.database.models import KnowledgeType, Source
     from app.ai.registry import ProviderRegistry
     from app.ai.wiki_agent import compile_source_with_agent
+    from app.database import async_session_factory
+    from app.database.models import KnowledgeType, Source, SourceImage
     from app.services.image_service import extract_images
-    from app.services.source_outline import assemble_full_text, build_outline
-    from app.services.storage_service import storage_service
     from app.services.kb_service import (
         _extract_text_from_file,
-        _inline_image_captions,
+        _inline_image_markers,
     )
+    from app.services.source_outline import assemble_full_text, build_outline
+    from app.services.storage_service import storage_service
 
     sid = uuid.UUID(source_id)
     tracker = ProgressTracker(sid)
@@ -128,20 +128,51 @@ async def ingest_file_task(ctx: dict, source_id: str):
             registry = ProviderRegistry(session)
             vision_provider = await registry.get_vision()
             if vision_provider and images:
+                # Build a lookup of page text by page number so we can give
+                # the vision model surrounding context when captioning.
+                page_text_by_num: dict[int, str] = {
+                    p.get("page_number") or 1: (p.get("content") or "")[:1500]
+                    for p in pages_data
+                }
                 for idx, img in enumerate(images, 1):
                     try:
                         if idx % 5 == 0 or idx == 1 or idx == len(images):
                             logger.info(f"Vision AI analyzing image {idx}/{len(images)}...")
                         img_bytes = storage_service.download_file(img.minio_key)
-                        mime_type = "image/png" if img.minio_key.lower().endswith(".png") else "image/jpeg"
-                        img.caption = await vision_provider.analyze_image(img_bytes, mime_type)
+                        page_ctx = page_text_by_num.get(img.page_number or 1, "")
+                        vision_prompt = (
+                            "Describe this image concisely in 1-3 sentences. "
+                            "Focus on what is shown (diagrams, charts, photos, illustrations) "
+                            "and what information it conveys. Be specific — mention key elements, "
+                            "labels, numbers, or steps visible in the image. Do not start with "
+                            "'Based on the image' or similar filler phrases.\n\n"
+                            + (f"Page context:\n{page_ctx}" if page_ctx else "")
+                        )
+                        img.caption = await vision_provider.analyze_image(
+                            img_bytes, img.content_type, prompt=vision_prompt
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to analyze image {img.minio_key}: {e}")
             elif images:
                 logger.info("No vision provider configured, skipping image captioning")
 
-            # Inline captions into per-page text so the compiler sees them.
-            _inline_image_captions(pages_data, images)
+            # Persist images so wiki content_md can reference them by uuid.
+            for img in images:
+                row = SourceImage(
+                    source_id=uuid.UUID(source_id),
+                    minio_key=img.minio_key,
+                    page_number=img.page_number,
+                    image_index=img.image_index,
+                    caption=img.caption,
+                    content_type=img.content_type,
+                    size_bytes=img.size_bytes,
+                )
+                session.add(row)
+                await session.flush()
+                img.image_id = str(row.id)
+
+            # Inline image markers into per-page text so the compiler sees them.
+            _inline_image_markers(pages_data, images)
             await tracker.update(40, f"Analyzed {len(images)} images")
 
             # --- Step 4: Build outline + assemble full_text (50%) ---
@@ -201,21 +232,35 @@ async def ingest_file_task(ctx: dict, source_id: str):
                 "pages_updated": result["pages_updated"],
             }
 
-        except Exception as e:
+        except BaseException as e:
             logger.error(f"Ingestion failed for {source_id}: {e}")
-            source.status = "error"
-            source.error_message = str(e)[:500]
-            source.progress = 0
-            source.progress_message = f"Error: {str(e)[:200]}"
-            await session.commit()
+            error_msg = str(e)[:500]
+            progress_msg = f"Error: {str(e)[:200]}"
+
+            async def _mark_error_file() -> None:
+                from app.database import async_session_factory as _sf
+                from app.database.models import Source as _Source
+                async with _sf() as err_session:
+                    src = await err_session.get(_Source, sid)
+                    if src:
+                        src.status = "error"
+                        src.error_message = error_msg
+                        src.progress = 0
+                        src.progress_message = progress_msg
+                        await err_session.commit()
+
+            try:
+                await asyncio.shield(_mark_error_file())
+            except Exception:
+                pass
             raise
 
 
 async def ingest_url_task(ctx: dict, source_id: str):
     """arq task: URL ingestion → wiki compilation."""
+    from app.ai.wiki_agent import compile_source_with_agent
     from app.database import async_session_factory
     from app.database.models import KnowledgeType, Source
-    from app.ai.wiki_agent import compile_source_with_agent
     from app.services.kb_service import _extract_text_from_url
     from app.services.source_outline import assemble_full_text, build_outline
 
@@ -292,40 +337,26 @@ async def ingest_url_task(ctx: dict, source_id: str):
                 "pages_updated": result["pages_updated"],
             }
 
-        except Exception as e:
+        except BaseException as e:
             logger.error(f"URL ingestion failed for {source_id}: {e}")
-            source.status = "error"
-            source.error_message = str(e)[:500]
-            source.progress = 0
-            await session.commit()
+            error_msg = str(e)[:500]
+
+            async def _mark_error_url() -> None:
+                from app.database import async_session_factory as _sf
+                from app.database.models import Source as _Source
+                async with _sf() as err_session:
+                    src = await err_session.get(_Source, sid)
+                    if src:
+                        src.status = "error"
+                        src.error_message = error_msg
+                        src.progress = 0
+                        await err_session.commit()
+
+            try:
+                await asyncio.shield(_mark_error_url())
+            except Exception:
+                pass
             raise
-
-
-async def reingest_file_task(ctx: dict, source_id: str, force: bool = False):
-    """
-    arq task: re-ingest a file already stored in MinIO.
-
-    If `force=True`, detach this source from all wiki pages first (orphan
-    pages get deleted). Otherwise the compiler will merge new ops on top of
-    the existing wiki state.
-    """
-    from app.database import async_session_factory
-    from app.database.models import Source
-    from app.services import wiki_service
-
-    sid = uuid.UUID(source_id)
-
-    async with async_session_factory() as session:
-        source = await session.get(Source, sid)
-        if not source or not source.minio_key:
-            raise ValueError(f"Source {source_id} not found or has no file")
-
-        if force:
-            await wiki_service.detach_source_from_wiki(session, sid)
-            await wiki_service.regenerate_index(session)
-            await session.commit()
-
-    await ingest_file_task(ctx, source_id)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +369,7 @@ async def ingest_skill_task(ctx: dict, skill_id: str, version_id: str, file_path
     arq task: unzip skill package from disk buffer, store in MinIO, and extract metadata.
     """
     import os
+
     from app.database import async_session_factory
     from app.database.models import Skill, SkillVersion
     from app.services.storage_service import storage_service
@@ -366,8 +398,9 @@ async def ingest_skill_task(ctx: dict, skill_id: str, version_id: str, file_path
                 await session.commit()
                 return
 
-            import hashlib
             import asyncio
+            import hashlib
+
             from app.services.kb_service import _guess_content_type
 
             # 1. Stream Hash calculation
@@ -416,7 +449,7 @@ async def ingest_skill_task(ctx: dict, skill_id: str, version_id: str, file_path
                     # [Security] Zip Bomb check
                     total_size += member.file_size
                     if total_size > MAX_UNCOMPRESSED_SIZE:
-                        raise ValueError(f"Uncompressed size too large (exceeds 10MB)")
+                        raise ValueError("Uncompressed size too large (exceeds 10MB)")
 
                     object_name = f"skills/{skill_id}/versions/{version.version_number}/content/{filename}"
                     target_readme = f"{skill_name}/SKILL.md".lower()
@@ -443,8 +476,8 @@ async def ingest_skill_task(ctx: dict, skill_id: str, version_id: str, file_path
             # 3. Update DB with extracted metadata
             if readme_content:
                 skill.description = readme_content
-                version.readme = readme_content
-            
+
+
             skill.version_hash = file_hash
             skill.current_version = version.version_number
             skill.storage_path = f"skills/{skill_id}/versions/{version.version_number}/content/"
@@ -529,10 +562,157 @@ async def cleanup_temp_uploads_cron(ctx: dict):
                     logger.debug(f"Cronjob: Failed to clean {filename}: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Embedding migration: re-embed every wiki page with a new model
+# ---------------------------------------------------------------------------
+
+async def reembed_all_pages_task(ctx: dict, job_id: str) -> None:
+    """
+    Re-embed every wiki page using the model spec referenced by the job.
+
+    On success, atomically flips `app_config.active_embedding_model_spec_id`
+    to the new spec — search keeps using the OLD model until that flip lands,
+    so there is no zero-result window during the migration.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from app.ai.embedding_catalog import get_spec
+    from app.ai.registry import ProviderRegistry
+    from app.database import async_session_factory
+    from app.database.models import EmbeddingJob, WikiPage
+    from app.services.config_service import (
+        ACTIVE_EMBEDDING_MODEL_KEY,
+        ConfigService,
+    )
+    from app.services.embedding_storage import (
+        cleanup_stale_embeddings,
+        compute_content_hash,
+        embedding_input_text,
+        upsert_page_embedding,
+    )
+
+    job_uuid = uuid.UUID(job_id)
+    BATCH = 50
+
+    async with async_session_factory() as session:
+        job = await session.get(EmbeddingJob, job_uuid)
+        if job is None:
+            logger.error(f"reembed: job {job_id} not found")
+            return
+        if job.status not in ("pending", "running"):
+            logger.info(f"reembed: job {job_id} status={job.status}, skipping")
+            return
+
+        try:
+            spec = get_spec(job.model_spec_id)
+        except Exception as e:
+            job.status = "failed"
+            job.error_message = f"Unknown model spec: {e}"
+            job.finished_at = datetime.now(timezone.utc)
+            await session.commit()
+            return
+
+        # Provision a provider bound to the NEW spec (not the active one).
+        registry = ProviderRegistry(session)
+        try:
+            provider = await registry.get_embedding(
+                task="document", spec_id=spec.id
+            )
+        except Exception as e:
+            job.status = "failed"
+            job.error_message = f"Provider init failed: {e}"
+            job.finished_at = datetime.now(timezone.utc)
+            await session.commit()
+            return
+
+        # Count work and mark running.
+        total = (
+            await session.execute(
+                select(WikiPage.id).where(
+                    WikiPage.slug.notin_(["_index", "_log"])
+                )
+            )
+        ).scalars().all()
+        job.total_pages = len(total)
+        job.done_pages = 0
+        job.status = "running"
+        job.started_at = datetime.now(timezone.utc)
+        await session.commit()
+
+    logger.info(
+        f"reembed: starting job {job_id} model={spec.id} dim={spec.dimension} "
+        f"total={len(total)}"
+    )
+
+    # Process batches in independent sessions so progress is visible to UI poll.
+    for offset in range(0, len(total), BATCH):
+        batch_ids = total[offset : offset + BATCH]
+        async with async_session_factory() as session:
+            # Re-check cancellation flag.
+            job = await session.get(EmbeddingJob, job_uuid)
+            if job is None or job.status == "cancelled":
+                logger.info(f"reembed: job {job_id} cancelled at offset={offset}")
+                return
+
+            pages = (
+                await session.execute(
+                    select(WikiPage).where(WikiPage.id.in_(batch_ids))
+                )
+            ).scalars().all()
+            inputs = [
+                embedding_input_text(p.title, p.summary or "", p.content_md or "")
+                for p in pages
+            ]
+            try:
+                vectors = await provider.embed_batch(inputs)
+            except Exception as e:
+                job.status = "failed"
+                job.error_message = f"Embedding API failed: {e}"
+                job.finished_at = datetime.now(timezone.utc)
+                await session.commit()
+                logger.exception(f"reembed: job {job_id} failed at offset={offset}")
+                return
+
+            for page, vec in zip(pages, vectors):
+                await upsert_page_embedding(
+                    session,
+                    page_id=page.id,
+                    spec=spec,
+                    vector=list(vec),
+                    content_hash=compute_content_hash(
+                        page.title, page.summary or "", page.content_md or ""
+                    ),
+                )
+            job.done_pages = min(offset + len(pages), job.total_pages)
+            await session.commit()
+
+    # Atomic flip + cleanup of old model's vectors.
+    async with async_session_factory() as session:
+        job = await session.get(EmbeddingJob, job_uuid)
+        if job is None or job.status == "cancelled":
+            return
+        svc = ConfigService(session)
+        await svc.set(ACTIVE_EMBEDDING_MODEL_KEY, spec.id)
+        deleted = await cleanup_stale_embeddings(session, keep_spec_id=spec.id)
+        job.status = "completed"
+        job.finished_at = datetime.now(timezone.utc)
+        await session.commit()
+        logger.info(
+            f"reembed: job {job_id} complete — flipped to {spec.id}, "
+            f"cleaned up {deleted} stale embedding rows"
+        )
+
+
 class WorkerSettings:
     """arq worker configuration."""
 
-    functions = [ingest_file_task, ingest_url_task, reingest_file_task]
+    functions = [
+        ingest_file_task,
+        ingest_url_task,
+        reembed_all_pages_task,
+    ]
     redis_settings = _get_redis_settings()
     max_jobs = settings.worker_max_jobs
     job_timeout = settings.worker_job_timeout

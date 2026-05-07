@@ -196,7 +196,7 @@ arkon/
 │   │   └── __init__.py       # async_session_factory, get_db dependency
 │   ├── routers/
 │   │   ├── auth.py           # Login, me, change-password
-│   │   ├── sources.py        # Document upload, ingestion, recompile
+│   │   ├── sources.py        # Document upload, ingestion, retry
 │   │   ├── wiki.py           # Wiki page CRUD, revisions, graph
 │   │   ├── wiki_drafts.py    # Draft propose/approve/reject
 │   │   ├── projects.py       # Workspace CRUD, members, sources, wiki
@@ -233,7 +233,8 @@ arkon/
 │   └── versions/                 # Migration files (001 → 014)
 ├── docker-compose.yml
 ├── Dockerfile
-├── .env.example
+├── .env.docker.example     # Env template for Docker Compose
+├── .env.local.example      # Env template for local development
 └── pyproject.toml
 ```
 

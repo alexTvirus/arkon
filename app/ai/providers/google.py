@@ -129,7 +129,7 @@ class GoogleLLM(LLMProvider):
         self,
         prompt: str,
         system: Optional[str] = None,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         temperature: float = 0.7,
     ) -> str:
         from google.genai import types
@@ -150,7 +150,7 @@ class GoogleLLM(LLMProvider):
         messages: list[dict],
         tools: list[dict],
         system: Optional[str] = None,
-        max_tokens: int = 8192,
+        max_tokens: Optional[int] = None,
         temperature: float = 0.2,
     ) -> AssistantTurn:
         from google.genai import types as gtypes
@@ -253,7 +253,6 @@ class GoogleVision(VisionProvider):
                     ],
                     config=types.GenerateContentConfig(
                         temperature=0.2,
-                        max_output_tokens=1024,
                     ),
                 )
                 return response.text.strip() if response.text else ""
@@ -272,7 +271,7 @@ class GoogleVision(VisionProvider):
                 b"\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00"
                 b"\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
             )
-            result = await self.analyze_image(tiny_png, "image/png", "What is this?")
+            await self.analyze_image(tiny_png, "image/png", "What is this?")
             return True, f"OK — model={self.config.model_id}"
         except Exception as e:
             return False, f"Google Vision error: {e}"
