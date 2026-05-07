@@ -18,6 +18,7 @@ class StorageService:
 
     def __init__(self):
         self._client: Optional[Minio] = None
+        self._presign_client: Optional[Minio] = None
 
     @property
     def client(self) -> Minio:
@@ -29,6 +30,26 @@ class StorageService:
                 secure=settings.minio_secure,
             )
         return self._client
+
+    @property
+    def presign_client(self) -> Minio:
+        """Separate client using the public endpoint so presigned URL signatures match.
+
+        Pre-seeds the bucket region to avoid a connectivity check against the public
+        endpoint (which may be unreachable from inside the Docker container).
+        MinIO always uses us-east-1 by default.
+        """
+        if self._presign_client is None:
+            public = settings.minio_public_endpoint or settings.minio_endpoint
+            client = Minio(
+                endpoint=public,
+                access_key=settings.minio_access_key,
+                secret_key=settings.minio_secret_key,
+                secure=settings.minio_secure,
+            )
+            client._region_map[settings.minio_bucket] = "us-east-1"
+            self._presign_client = client
+        return self._presign_client
 
     async def ensure_bucket(self):
         """Create the default bucket if it doesn't exist."""
@@ -109,14 +130,17 @@ class StorageService:
         object_name: str,
         expiry_hours: Optional[int] = None,
     ) -> str:
-        """Generate a presigned download URL."""
+        """Generate a presigned download URL using the public-facing endpoint.
+
+        Uses a dedicated client configured with minio_public_endpoint so the
+        HMAC signature is computed against the browser-accessible hostname.
+        """
         hours = expiry_hours or settings.minio_presign_expiry_hours
-        url = self.client.presigned_get_object(
+        return self.presign_client.presigned_get_object(
             bucket_name=settings.minio_bucket,
             object_name=object_name,
             expires=timedelta(hours=hours),
         )
-        return url
 
     def delete_object(self, object_name: str):
         """Delete a file from MinIO."""

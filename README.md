@@ -83,7 +83,7 @@ DEFAULT_ADMIN_PASSWORD=your-secure-password
 ```
 
 ```bash
-docker compose up -d
+docker compose --env-file .env.docker up -d --build
 ```
 
 Open **http://localhost:3119** and log in with your admin credentials.

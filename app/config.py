@@ -38,6 +38,12 @@ class Settings(BaseSettings):
 
     # --- MinIO ---
     minio_endpoint: str = Field(default="localhost:9000")
+    minio_public_endpoint: str = Field(
+        default="",
+        description="Public-facing MinIO address used in presigned URLs (browser-accessible). "
+                    "Defaults to minio_endpoint if not set. "
+                    "In Docker: set to 'localhost:9000' so presigned URLs work from the browser.",
+    )
     minio_access_key: str = Field(default="minioadmin")
     minio_secret_key: str = Field(default="minioadmin123")
     minio_bucket: str = Field(default="arkon-files")
