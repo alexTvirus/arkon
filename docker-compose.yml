@@ -1,6 +1,9 @@
 
 # Backend image built once, reused by api + workers
 x-backend: &backend
+  build:
+    context: .
+    dockerfile: Dockerfile
   image: arkon-backend:latest
   env_file: [.env.docker]
   restart: always
@@ -73,9 +76,6 @@ services:
 
   api:
     <<: *backend
-    build:
-      context: .
-      dockerfile: Dockerfile
     container_name: arkon_api
     ports:
       - "5055:5055"
