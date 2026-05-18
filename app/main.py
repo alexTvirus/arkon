@@ -127,6 +127,7 @@ from app.routers import (  # noqa: E402
     projects,
     rbac,
     roles,
+    scopes,
     skill_contributions,
     skills,
     sources,
@@ -152,6 +153,7 @@ app.include_router(projects.router, prefix="/api", tags=["projects"])
 app.include_router(roles.router, prefix="/api", tags=["roles"])
 app.include_router(audit.router, prefix="/api", tags=["audit"])
 app.include_router(skills.router, prefix="/api", tags=["skills"])
+app.include_router(scopes.router, prefix="/api", tags=["scopes"])
 app.include_router(skill_contributions.router, prefix="/api", tags=["skill-contributions"])
 
 
