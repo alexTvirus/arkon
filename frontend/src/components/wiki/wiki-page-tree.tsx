@@ -338,7 +338,7 @@ export function WikiPageTree({
           className="text-muted-foreground hover:text-foreground transition-colors"
           title="Expand page tree"
         >
-          <span className="material-symbols-outlined text-base">chevron_right</span>
+          <span className="material-symbols-outlined text-base">left_panel_open</span>
         </button>
       </div>
     );
@@ -359,7 +359,7 @@ export function WikiPageTree({
           className="text-muted-foreground hover:text-foreground transition-colors"
           title="Collapse"
         >
-          <span className="material-symbols-outlined text-base">chevron_left</span>
+          <span className="material-symbols-outlined text-base">left_panel_close</span>
         </button>
       </div>
 
@@ -406,28 +406,54 @@ export function WikiPageTree({
             scopeGrouped.map((bucket) => {
               const scopeExpanded = expandedScopes.has(bucket.key);
               const typeOrder = GROUP_ORDER.filter((t) => bucket.byType.has(t));
+              const isActive = activeScopeKey === bucket.key;
+              const scopeHref =
+                bucket.scope_type === "global"
+                  ? "/wiki"
+                  : bucket.scope_id
+                    ? `/wiki?scope_type=${bucket.scope_type}&scope_id=${bucket.scope_id}`
+                    : `/wiki?scope_type=${bucket.scope_type}`;
               return (
                 <div key={bucket.key} className="mb-2">
-                  <button
-                    onClick={() => toggleScope(bucket.key)}
-                    className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-accent/40 transition-colors"
+                  <div
+                    className={cn(
+                      "flex items-center gap-1 px-1 transition-colors rounded-md",
+                      isActive ? "bg-accent/50" : "hover:bg-accent/30",
+                    )}
                   >
-                    <span className="material-symbols-outlined text-xs text-muted-foreground">
-                      {scopeExpanded ? "expand_more" : "chevron_right"}
-                    </span>
-                    <span
-                      className="material-symbols-outlined text-xs text-muted-foreground"
-                      style={{ fontSize: 13 }}
+                    <button
+                      onClick={() => toggleScope(bucket.key)}
+                      className="shrink-0 p-1 text-muted-foreground hover:text-foreground transition-colors"
+                      title={scopeExpanded ? "Collapse" : "Expand"}
                     >
-                      {SCOPE_ICONS[bucket.scope_type] ?? "tune"}
-                    </span>
-                    <span className="text-xs font-semibold text-foreground uppercase tracking-wide flex-1 text-left truncate">
-                      {bucket.label}
-                    </span>
-                    <span className="text-xs text-muted-foreground tabular-nums">
-                      {bucket.total}
-                    </span>
-                  </button>
+                      <span className="material-symbols-outlined text-xs">
+                        {scopeExpanded ? "expand_more" : "chevron_right"}
+                      </span>
+                    </button>
+                    <Link
+                      href={scopeHref}
+                      className="flex-1 flex items-center gap-2 py-1.5 min-w-0 text-left"
+                      title={`Open ${bucket.label} wiki`}
+                    >
+                      <span
+                        className="material-symbols-outlined text-xs text-muted-foreground"
+                        style={{ fontSize: 13 }}
+                      >
+                        {SCOPE_ICONS[bucket.scope_type] ?? "tune"}
+                      </span>
+                      <span
+                        className={cn(
+                          "text-xs font-semibold uppercase tracking-wide flex-1 truncate",
+                          isActive ? "text-primary" : "text-foreground",
+                        )}
+                      >
+                        {bucket.label}
+                      </span>
+                      <span className="text-xs text-muted-foreground tabular-nums pr-2">
+                        {bucket.total}
+                      </span>
+                    </Link>
+                  </div>
                   {scopeExpanded && (
                     <div className="ml-3">
                       {typeOrder.map((type) => {
