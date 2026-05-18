@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import Link from "next/link";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -80,7 +81,14 @@ export function DepartmentCards({ departments, loading, onEdit, onRefresh }: Pro
             </p>
           )}
 
-          <div className="flex gap-2 mt-auto pt-2 border-t border-border">
+          <div className="flex flex-wrap gap-2 mt-auto pt-2 border-t border-border">
+            <Link
+              href={`/wiki?scope_type=department&scope_id=${dept.id}`}
+              className="inline-flex items-center text-xs px-2.5 py-1.5 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            >
+              <span className="material-symbols-outlined text-sm mr-1">auto_stories</span>
+              Wiki
+            </Link>
             <Button
               variant="ghost"
               size="sm"
