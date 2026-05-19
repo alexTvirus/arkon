@@ -220,7 +220,7 @@ def _login_form(
         <button type="submit">Sign in</button>
       </form>
     </div>
-    <p class="footer">Arkon v0.1 — On-Premise Deployment</p>
+    <p class="footer">Arkon v0.5 — On-Premise Deployment</p>
   </div>
 </body>
 </html>"""
