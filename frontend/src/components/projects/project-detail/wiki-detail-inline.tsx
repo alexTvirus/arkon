@@ -162,9 +162,6 @@ export function WikiDetailInline({
           <h1 className="font-heading text-4xl font-normal leading-tight text-foreground">
             {page.title}
           </h1>
-          {page.summary && (
-            <p className="mt-2 text-muted-foreground text-sm leading-6">{page.summary}</p>
-          )}
         </div>
 
         {mode === "view" && (canEdit || canPropose) && (
