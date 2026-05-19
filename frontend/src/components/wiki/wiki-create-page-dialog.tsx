@@ -26,8 +26,13 @@ type Props = {
   mode: Mode;
   /** Pre-selected scope. User can still change it within the dialog. */
   defaultScope: WikiScope;
-  /** Scopes the user is allowed to write to. */
+  /** All scopes the user can READ. The dropdown filters to writable ones. */
   scopes: WikiScope[];
+  /** Returns the create flow available in `scope` (or null when none). When
+   *  provided, the scope dropdown drops options where this returns null so
+   *  the user cannot accidentally pick a scope they have no write permission
+   *  for, and the dialog title / submit endpoint follow the picked scope. */
+  getCreateModeForScope?: (scope: { scope_type: string; scope_id: string | null }) => Mode | null;
   /** Optional initial title — used when opening from a knowledge-gap suggestion. */
   defaultTitle?: string;
 };
@@ -50,6 +55,7 @@ export function WikiCreatePageDialog({
   mode,
   defaultScope,
   scopes,
+  getCreateModeForScope,
   defaultTitle = "",
 }: Props) {
   const router = useRouter();
@@ -64,6 +70,28 @@ export function WikiCreatePageDialog({
   const [note, setNote] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+
+  // Restrict the scope dropdown to scopes the user can actually write to.
+  // Without this filter a user with wiki:write:own_dept (and wiki:read:all)
+  // sees every department in `scopes` and can pick someone else's dept,
+  // leaking a cross-department draft past the contextual permission gate.
+  const writableScopes = React.useMemo(() => {
+    if (!getCreateModeForScope) return scopes;
+    return scopes.filter((s) =>
+      getCreateModeForScope({
+        scope_type: s.scope_type,
+        scope_id: s.scope_id ?? null,
+      }) !== null,
+    );
+  }, [scopes, getCreateModeForScope]);
+
+  // Effective mode follows the currently-selected scope so 'direct' switches
+  // to 'propose' when the user picks a scope where they only have own_dept.
+  const [pickedScopeType, pickedScopeIdRaw] = scopeKey.split(":");
+  const pickedScopeId = pickedScopeIdRaw || null;
+  const effectiveMode: Mode = getCreateModeForScope
+    ? getCreateModeForScope({ scope_type: pickedScopeType, scope_id: pickedScopeId }) ?? mode
+    : mode;
 
   // Auto-derive slug from title until the user edits it manually.
   React.useEffect(() => {
@@ -94,7 +122,7 @@ export function WikiCreatePageDialog({
     setBusy(true);
     setError(null);
     try {
-      if (mode === "direct") {
+      if (effectiveMode === "direct") {
         const page = await api<WikiPageDetail>("/api/wiki/pages", {
           method: "POST",
           body: {
@@ -146,10 +174,10 @@ export function WikiCreatePageDialog({
       <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {mode === "direct" ? "Create new page" : "Propose new page"}
+            {effectiveMode === "direct" ? "Create new page" : "Propose new page"}
           </DialogTitle>
           <DialogDescription>
-            {mode === "direct"
+            {effectiveMode === "direct"
               ? "The page is created immediately and added to the index."
               : "An editor will review the proposal before the page is materialised."}
           </DialogDescription>
@@ -208,7 +236,7 @@ export function WikiCreatePageDialog({
                 onChange={(e) => setScopeKey(e.target.value)}
                 className="h-9 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
               >
-                {scopes.map((s) => (
+                {writableScopes.map((s) => (
                   <option
                     key={`${s.scope_type}:${s.scope_id ?? ""}`}
                     value={`${s.scope_type}:${s.scope_id ?? ""}`}
@@ -230,7 +258,7 @@ export function WikiCreatePageDialog({
             />
           </div>
 
-          {mode === "propose" && (
+          {effectiveMode === "propose" && (
             <div className="grid gap-1.5">
               <Label htmlFor="cp-note">
                 Note for reviewer <span className="text-muted-foreground font-normal">(optional)</span>
@@ -258,10 +286,10 @@ export function WikiCreatePageDialog({
               </span>
             ) : (
               <span className="material-symbols-outlined text-sm">
-                {mode === "direct" ? "add" : "send"}
+                {effectiveMode === "direct" ? "add" : "send"}
               </span>
             )}
-            {mode === "direct" ? "Create page" : "Submit proposal"}
+            {effectiveMode === "direct" ? "Create page" : "Submit proposal"}
           </Button>
         </DialogFooter>
       </DialogContent>

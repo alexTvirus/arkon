@@ -240,13 +240,27 @@ class DraftResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 async def _can_propose(db: AsyncSession, user: Employee, page: WikiPage) -> bool:
-    """Contributor+ in workspace, or any wiki:write for global pages."""
+    """Permission to propose an edit on `page`.
+
+    - Project pages: workspace contributor+ (or admin).
+    - Department pages: `wiki:write:all` for any dept, or
+      `wiki:write:own_dept` ONLY when the page belongs to the user's own
+      department. Previously this branch fell through to `has_any_permission`
+      which let own_dept users propose on every department.
+    - Global pages: any wiki:write permission.
+    """
     if user.role == "admin":
         return True
+    perms = _get_user_permissions(user)
     if page.scope_type == "project" and page.scope_id:
         role = await get_workspace_role(db, user, page.scope_id)
         return bool(role) and workspace_role_can(role, "contributor")
-    perms = _get_user_permissions(user)
+    if page.scope_type == "department" and page.scope_id:
+        if "wiki:write:all" in perms:
+            return True
+        if "wiki:write:own_dept" in perms and user.department_id == page.scope_id:
+            return True
+        return False
     return has_any_permission(list(perms), "wiki", "write")
 
 
@@ -627,22 +641,37 @@ async def list_all_drafts(
 async def list_page_drafts(
     slug: str,
     status: Optional[str] = Query(None),
+    scope_type: Optional[str] = Query(None),
+    scope_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     user: Employee = Depends(get_current_user),
 ):
-    """List drafts for a specific wiki page."""
-    page = await wiki_service.get_page_by_slug_any_scope(db, slug)
+    """List drafts for a specific wiki page.
+
+    Reviewers see every draft on the page; authors always see their own
+    drafts so they can withdraw / resubmit / inspect from the wiki UI.
+    """
+    sid = uuid.UUID(scope_id) if scope_id else None
+    if scope_type:
+        page = await wiki_service.get_page_by_slug(
+            db, slug, scope_type=scope_type, scope_id=sid,
+        )
+    else:
+        page = await wiki_service.get_page_by_slug_any_scope(db, slug)
     if not page:
         raise HTTPException(404, f"Wiki page not found: {slug}")
 
-    if not await _can_review(db, user, page):
-        raise HTTPException(403, "Insufficient permission to view drafts for this page")
-
+    is_reviewer = await _can_review(db, user, page)
     stmt = (
         select(WikiPageDraft)
         .where(WikiPageDraft.page_id == page.id)
         .order_by(WikiPageDraft.created_at.desc())
     )
+    if not is_reviewer:
+        # Author-only mode: restrict to drafts this user authored. No 403 here
+        # so the wiki UI can hit this endpoint unconditionally and just get
+        # back an empty list for users with neither role.
+        stmt = stmt.where(WikiPageDraft.author_id == user.id)
     if status:
         stmt = stmt.where(WikiPageDraft.status == status)
 
@@ -931,12 +960,21 @@ async def propose_create_page(
     """
     # Contributor-level check, mirroring _can_propose for edit drafts.
     if user.role != "admin":
+        perms = _get_user_permissions(user)
         if body.scope_type == "project" and body.scope_id:
             role = await get_workspace_role(db, user, body.scope_id)
             if not role or not workspace_role_can(role, "contributor"):
                 raise HTTPException(403, "Requires contributor role or above in this workspace")
+        elif body.scope_type == "department" and body.scope_id:
+            # own_dept perm only counts when proposing in the user's own dept.
+            if "wiki:write:all" not in perms and not (
+                "wiki:write:own_dept" in perms and user.department_id == body.scope_id
+            ):
+                raise HTTPException(
+                    403,
+                    "Insufficient permission to propose pages in this department",
+                )
         else:
-            perms = _get_user_permissions(user)
             if not has_any_permission(list(perms), "wiki", "write"):
                 raise HTTPException(403, "Insufficient permission to propose new pages")
 

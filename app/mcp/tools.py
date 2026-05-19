@@ -105,7 +105,14 @@ async def _can_review_page(session: AsyncSession, employee, page) -> bool:
 
 
 async def _can_contribute_to_page(session: AsyncSession, employee, page) -> bool:
-    """Contributor+ in the page's workspace, or wiki:write globally, or admin."""
+    """Permission to propose an edit on `page` via MCP.
+
+    Mirrors REST `_can_propose`:
+    - Project pages: workspace contributor+.
+    - Department pages: wiki:write:all, or wiki:write:own_dept restricted to
+      the employee's own department.
+    - Global pages: any wiki:write permission.
+    """
     from app.services.permission_engine import (
         _get_user_permissions,
         get_workspace_role,
@@ -114,12 +121,19 @@ async def _can_contribute_to_page(session: AsyncSession, employee, page) -> bool
     )
     if employee.role == "admin":
         return True
+    perms = _get_user_permissions(employee)
     if page.scope_type == "project" and page.scope_id:
         role = await get_workspace_role(session, employee, page.scope_id)
         if not role:
             return False
         return workspace_role_can(role, "contributor")
-    perms = _get_user_permissions(employee)
+    if page.scope_type == "department" and page.scope_id:
+        if "wiki:write:all" in perms:
+            return True
+        return (
+            "wiki:write:own_dept" in perms
+            and employee.department_id == page.scope_id
+        )
     return has_any_permission(list(perms), "wiki", "write")
 
 
@@ -1484,6 +1498,28 @@ def register_tools(mcp: FastMCP):
             employee = await session.get(Employee, identity.employee_id)
             if not employee:
                 return "Error: employee not found."
+
+            # Permission gate matching REST propose_create_page.
+            if employee.role != "admin":
+                from app.services.permission_engine import (
+                    _get_user_permissions,
+                    get_workspace_role,
+                    has_any_permission,
+                    workspace_role_can,
+                )
+                perms = _get_user_permissions(employee)
+                if scope_type == "project" and sid:
+                    role = await get_workspace_role(session, employee, sid)
+                    if not role or not workspace_role_can(role, "contributor"):
+                        return "Error: requires contributor role or above in this workspace."
+                elif scope_type == "department" and sid:
+                    if "wiki:write:all" not in perms and not (
+                        "wiki:write:own_dept" in perms and employee.department_id == sid
+                    ):
+                        return "Error: insufficient permission to propose pages in this department."
+                else:
+                    if not has_any_permission(list(perms), "wiki", "write"):
+                        return "Error: insufficient permission to propose new pages."
 
             existing = await wiki_service.get_page_by_slug(
                 session, slug, scope_type=scope_type, scope_id=sid,

@@ -393,6 +393,12 @@ export default function WikiIndexPage() {
           mode={dialogMode}
           defaultScope={dialogTargetScope}
           scopes={scopes}
+          getCreateModeForScope={(s) =>
+            getCreateModeForScope({
+              scope_type: s.scope_type,
+              scope_id: s.scope_id ?? null,
+            })
+          }
           defaultTitle={prefillTitle}
         />
       )}

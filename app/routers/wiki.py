@@ -452,14 +452,29 @@ async def direct_create_wiki_page(
 async def direct_edit_wiki_page(
     slug: str,
     body: WikiDirectEditRequest,
+    scope_type: Optional[str] = Query(None),
+    scope_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     user: Employee = Depends(get_current_user),
 ):
-    """Direct sync edit by an editor or admin. No review step. Creates a revision."""
+    """Direct sync edit by an editor or admin. No review step. Creates a revision.
+
+    `scope_type` and `scope_id` query params target a specific scoped page —
+    required when the same slug exists in multiple scopes (otherwise the
+    backend would fall back to the first match).
+    """
     if slug in (wiki_service.INDEX_SLUG, wiki_service.LOG_SLUG):
         raise HTTPException(400, "Cannot directly edit reserved pages")
 
-    page = await wiki_service.get_page_by_slug_any_scope(db, slug)
+    sid = uuid.UUID(scope_id) if scope_id else None
+    if scope_type:
+        page = await wiki_service.get_page_by_slug(
+            db, slug, scope_type=scope_type, scope_id=sid,
+        )
+    else:
+        page = await wiki_service.get_page_by_slug(db, slug, scope_type="global", scope_id=None)
+        if not page:
+            page = await wiki_service.get_page_by_slug_any_scope(db, slug)
     if not page:
         raise HTTPException(404, f"Wiki page not found: {slug}")
 

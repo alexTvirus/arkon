@@ -153,9 +153,14 @@ async def get_neighborhood(
     depth = max(1, min(depth, 3))  # cap at 3 hops to keep queries cheap
     # Recursive CTE walking both directions over (origin_slug, target_slug)
     # tuples derived from wiki_links joined with wiki_pages on from_page_id.
+    # WITH RECURSIVE is required because `walk` self-references inside its
+    # own definition. Without the RECURSIVE keyword Postgres treats `walk` as
+    # not-yet-defined when it parses the second arm of the UNION, raising
+    # `relation "walk" does not exist`. The `edges` non-recursive CTE is
+    # allowed in the same WITH clause as long as RECURSIVE is set once.
     cte_sql = text(
         """
-        WITH edges AS (
+        WITH RECURSIVE edges AS (
             SELECT wp.slug AS from_slug, wl.to_slug AS to_slug
             FROM wiki_links wl
             JOIN wiki_pages wp ON wp.id = wl.from_page_id

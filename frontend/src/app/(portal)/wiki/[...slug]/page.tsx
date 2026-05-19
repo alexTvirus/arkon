@@ -84,6 +84,10 @@ export default function WikiPageViewer() {
   const [searchOpen, setSearchOpen] = React.useState(false);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [dialogScope, setDialogScope] = React.useState<WikiScope | null>(null);
+  // Author-side: the draft the user is currently resubmitting (needs_revision).
+  // When set, the page replaces the read view with a WikiEditor pre-filled
+  // with the draft's previous content.
+  const [editingDraft, setEditingDraft] = React.useState<DraftResponse | null>(null);
 
   // Edit mode
   const [mode, setMode] = React.useState<"view" | "edit">("view");
@@ -191,13 +195,20 @@ export default function WikiPageViewer() {
   // Load pending drafts (editors/admins only, after page loaded)
   // ---------------------------------------------------------------------------
   const fetchDrafts = React.useCallback(() => {
-    if (!page || !canReview) return;
+    if (!page) return;
+    // Backend returns reviewable drafts to reviewers and author-only drafts
+    // to everyone else — so the same fetch surfaces 'your pending draft'
+    // even when the user is not a reviewer of this page.
     api<DraftResponse[]>(
       `/api/wiki/pages/${encodeURIComponent(fullSlug)}/drafts${isScoped ? `?scope_type=${scopeType}&scope_id=${scopeId}` : ""}`
     )
-      .then((data) => setDrafts(data.filter((d) => d.status === "pending")))
+      .then((data) =>
+        setDrafts(
+          data.filter((d) => d.status === "pending" || d.status === "needs_revision"),
+        ),
+      )
       .catch(() => setDrafts([]));
-  }, [page, canReview, fullSlug, isScoped, scopeType, scopeId]);
+  }, [page, fullSlug, isScoped, scopeType, scopeId]);
 
   React.useEffect(() => {
     fetchDrafts();
@@ -221,6 +232,9 @@ export default function WikiPageViewer() {
   // Save handlers
   // ---------------------------------------------------------------------------
   const handleSaveEdit = async (content: string, note: string) => {
+    // Direct edit endpoint reads scope from query params (it accepts them via
+    // FastAPI Query). Pass both via the URL so the backend resolves the page
+    // in the correct scope even when the same slug exists elsewhere.
     const scopeParams = isScoped ? `?scope_type=${scopeType}&scope_id=${scopeId}` : "";
     const updated = await api<WikiPageDetail>(
       `/api/wiki/pages/${encodeURIComponent(fullSlug)}${scopeParams}`,
@@ -234,12 +248,21 @@ export default function WikiPageViewer() {
   };
 
   const handleSaveProposal = async (content: string, note: string) => {
-    const scopeParams = isScoped ? `?scope_type=${scopeType}&scope_id=${scopeId}` : "";
+    // propose_draft reads scope from the JSON body (Pydantic model, not Query).
+    // Sending the params via query did nothing — backend fell through to
+    // get_page_by_slug_any_scope, attaching the draft to whichever scope's
+    // copy of the slug happened to be returned first.
     await api(
-      `/api/wiki/pages/${encodeURIComponent(fullSlug)}/drafts${scopeParams}`,
+      `/api/wiki/pages/${encodeURIComponent(fullSlug)}/drafts`,
       {
         method: "POST",
-        body: { content_md: content, note: note || undefined },
+        body: {
+          content_md: content,
+          note: note || undefined,
+          scope_type: isScoped ? scopeType : "global",
+          scope_id: isScoped ? scopeId : undefined,
+          base_version: page?.version,
+        },
       }
     );
     setMode("view");
@@ -256,6 +279,25 @@ export default function WikiPageViewer() {
 
   const handleDraftRejected = (draftId: string) => {
     setDrafts((prev) => prev.filter((d) => d.id !== draftId));
+  };
+
+  const handleDraftWithdrawn = (draftId: string) => {
+    setDrafts((prev) => prev.filter((d) => d.id !== draftId));
+  };
+
+  const handleResubmitOpen = (draft: DraftResponse) => {
+    setEditingDraft(draft);
+  };
+
+  const handleResubmitSave = async (content: string, note: string) => {
+    if (!editingDraft) return;
+    await api(`/api/wiki/drafts/${editingDraft.id}/content`, {
+      method: "PATCH",
+      body: { content_md: content, note: note || undefined },
+    });
+    setEditingDraft(null);
+    // Refresh draft list so the banner shows the new pending status.
+    fetchDrafts();
   };
 
   // ---------------------------------------------------------------------------
@@ -431,20 +473,32 @@ export default function WikiPageViewer() {
                 )}
               </div>
 
-              {/* Draft review banner (editors/admins, view mode only) */}
-              {mode === "view" && canReview && drafts.length > 0 && (
+              {/* Draft banner — visible to reviewers AND to authors of own drafts. */}
+              {mode === "view" && !editingDraft && drafts.length > 0 && (
                 <div className="mb-6">
                   <WikiDraftBanner
                     drafts={drafts}
                     currentContent={page.content_md}
+                    currentUserId={user?.id ?? null}
                     onApproved={handleDraftApproved}
                     onRejected={handleDraftRejected}
+                    onResubmitDraft={handleResubmitOpen}
+                    onWithdrawn={handleDraftWithdrawn}
                   />
                 </div>
               )}
 
-              {/* Markdown body or Editor */}
-              {mode === "edit" ? (
+              {/* Markdown body / direct-edit / resubmit-draft editor */}
+              {editingDraft ? (
+                <WikiEditor
+                  initialContent={editingDraft.content_md}
+                  noteLabel="Resubmission note"
+                  notePlaceholder="What changed in this round?"
+                  saveLabel="Resubmit draft"
+                  onSave={handleResubmitSave}
+                  onCancel={() => setEditingDraft(null)}
+                />
+              ) : mode === "edit" ? (
                 <WikiEditor
                   initialContent={page.content_md}
                   noteLabel={canEdit ? "Change note" : "Proposal note"}
@@ -483,6 +537,12 @@ export default function WikiPageViewer() {
           mode={dialogMode}
           defaultScope={dialogTargetScope}
           scopes={scopes}
+          getCreateModeForScope={(s) =>
+            getCreateModeForScope({
+              scope_type: s.scope_type,
+              scope_id: s.scope_id ?? null,
+            })
+          }
         />
       )}
     </>

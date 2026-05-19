@@ -338,10 +338,23 @@ export default function WikiQueuePage() {
                     </td>
                     <td className="p-2 align-top">
                       <p className="text-sm">{d.author_name || "Unknown"}</p>
-                      {d.author_stats && d.author_stats.total_reviewed > 0 && (
-                        <p className="text-[11px] text-muted-foreground tabular-nums">
+                      {d.author_stats && d.author_stats.total_reviewed > 0 ? (
+                        <p
+                          className="text-[11px] text-muted-foreground tabular-nums"
+                          title={
+                            `${d.author_stats.approved} approved · ` +
+                            `${d.author_stats.rejected} rejected` +
+                            (d.author_stats.needs_revision
+                              ? ` · ${d.author_stats.needs_revision} returned`
+                              : "")
+                          }
+                        >
                           {d.author_stats.approved}✓ ·{" "}
                           {Math.round(d.author_stats.accuracy * 100)}%
+                        </p>
+                      ) : (
+                        <p className="text-[11px] text-muted-foreground italic">
+                          first contribution
                         </p>
                       )}
                     </td>
@@ -351,12 +364,60 @@ export default function WikiQueuePage() {
                       >
                         {d.ai_check_status}
                       </span>
+                      {d.ai_check_results && (
+                        <p className="text-[11px] text-muted-foreground tabular-nums mt-0.5">
+                          {d.ai_check_results.summary.warn > 0 && (
+                            <span>{d.ai_check_results.summary.warn} warn</span>
+                          )}
+                          {d.ai_check_results.summary.warn > 0 && d.ai_check_results.summary.fail > 0 && " · "}
+                          {d.ai_check_results.summary.fail > 0 && (
+                            <span className="text-rose-600 dark:text-rose-400">
+                              {d.ai_check_results.summary.fail} fail
+                            </span>
+                          )}
+                          {d.ai_check_results.summary.warn === 0 &&
+                            d.ai_check_results.summary.fail === 0 && (
+                              <span>{d.ai_check_results.summary.pass} pass</span>
+                            )}
+                        </p>
+                      )}
                     </td>
-                    <td className="p-2 align-top tabular-nums">
-                      {d.revision_round > 0 ? `r${d.revision_round}` : "—"}
+                    <td className="p-2 align-top tabular-nums text-xs">
+                      <span className="text-foreground">
+                        round {(d.revision_round ?? 0) + 1}
+                      </span>
+                      {d.last_returned_note && (
+                        <p
+                          className="text-[11px] text-muted-foreground italic mt-0.5 truncate max-w-[160px]"
+                          title={d.last_returned_note}
+                        >
+                          sent back
+                        </p>
+                      )}
                     </td>
                     <td className="p-2 align-top text-xs text-muted-foreground max-w-xs">
-                      <p className="line-clamp-2">{d.note || ""}</p>
+                      {d.note ? (
+                        <p className="line-clamp-2">{d.note}</p>
+                      ) : (
+                        <p className="italic text-muted-foreground/70">(no note)</p>
+                      )}
+                      {d.suggested_reviewers && d.suggested_reviewers.length > 0 && scopeMode === "review" && (
+                        <p
+                          className="text-[11px] text-muted-foreground mt-1 truncate"
+                          title={d.suggested_reviewers
+                            .map((r) => `${r.name || r.email || "?"} (${r.score})`)
+                            .join(", ")}
+                        >
+                          <span className="font-medium">→</span>{" "}
+                          {d.suggested_reviewers
+                            .slice(0, 2)
+                            .map((r) => r.name || r.email)
+                            .filter(Boolean)
+                            .join(", ")}
+                          {d.suggested_reviewers.length > 2 &&
+                            ` +${d.suggested_reviewers.length - 2}`}
+                        </p>
+                      )}
                     </td>
                     <td className="p-2 align-top text-xs text-muted-foreground whitespace-nowrap">
                       {relativeTime(d.created_at)}

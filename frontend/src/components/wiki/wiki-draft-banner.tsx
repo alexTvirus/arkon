@@ -12,9 +12,15 @@ type Props = {
   drafts: DraftResponse[];
   /** Current content of the parent page, used for the diff tab. */
   currentContent?: string;
+  /** Current viewer; controls whether author actions (withdraw / resubmit)
+   *  are shown instead of reviewer actions when the draft is the user's own. */
+  currentUserId?: string | null;
   onApproved: (draftId: string) => void;
   onRejected: (draftId: string) => void;
   onChangesRequested?: (draftId: string) => void;
+  /** Author-side: open the resubmit editor for this draft. The page wraps it. */
+  onResubmitDraft?: (draft: DraftResponse) => void;
+  onWithdrawn?: (draftId: string) => void;
 };
 
 type ReviewerAction = "approve" | "reject" | "request_changes";
@@ -26,9 +32,12 @@ const AI_POLL_INTERVAL_MS = 3000;
 export function WikiDraftBanner({
   drafts,
   currentContent = "",
+  currentUserId = null,
   onApproved,
   onRejected,
   onChangesRequested,
+  onResubmitDraft,
+  onWithdrawn,
 }: Props) {
   const [idx, setIdx] = React.useState(0);
   const [tab, setTab] = React.useState<BannerTab>("diff");
@@ -47,6 +56,22 @@ export function WikiDraftBanner({
   const isWithdrawn = draft.status === "withdrawn";
   const hasConflict = draft.has_conflict;
   const aiRunning = draft.ai_check_status === "pending" || draft.ai_check_status === "running";
+  const isOwnDraft = !!currentUserId && draft.author_id === currentUserId;
+
+  const handleWithdraw = async () => {
+    if (!window.confirm("Withdraw this draft? It will be removed from the review queue.")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/api/wiki/drafts/${draft.id}/withdraw`, { method: "POST" });
+      onWithdrawn?.(draft.id);
+      setIdx((i) => Math.max(0, i - 1));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Withdraw failed");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // Reset live snapshot when the user pages to a different draft.
   React.useEffect(() => {
@@ -384,6 +409,44 @@ export function WikiDraftBanner({
               )}
               {actionMode === "reject" ? "Confirm Reject" : "Send back"}
             </Button>
+          </>
+        ) : isOwnDraft ? (
+          // Author-side: this is the user's own pending or needs_revision draft.
+          // Reviewer actions don't apply; offer withdraw and (for needs_revision)
+          // edit & resubmit.
+          <>
+            {isNeedsRevision && onResubmitDraft && (
+              <Button
+                size="sm"
+                onClick={() => onResubmitDraft(draft)}
+                disabled={busy}
+                className={`gap-1.5 ${palette.primaryBtn}`}
+              >
+                <span className="material-symbols-outlined text-sm">edit</span>
+                Edit & resubmit
+              </Button>
+            )}
+            {!isWithdrawn && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleWithdraw}
+                disabled={busy}
+                className={`border ${palette.tabBorder} ${palette.text} ${palette.hover}`}
+              >
+                {busy ? (
+                  <span className="material-symbols-outlined text-sm animate-spin">progress_activity</span>
+                ) : (
+                  <span className="material-symbols-outlined text-sm mr-1">remove_circle</span>
+                )}
+                Withdraw
+              </Button>
+            )}
+            {isWithdrawn && (
+              <p className={`text-xs ${palette.muted} italic`}>
+                You withdrew this draft.
+              </p>
+            )}
           </>
         ) : isNeedsRevision || isWithdrawn ? (
           <p className={`text-xs ${palette.muted} italic`}>
