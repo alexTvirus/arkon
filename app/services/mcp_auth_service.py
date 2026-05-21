@@ -65,8 +65,61 @@ class ResolvedIdentity:
     # the wiki layer to include project-scoped wiki pages of those workspaces
     # in search/list/read paths — otherwise they're invisible even to members.
     project_ids: list[str] = field(default_factory=list)
+    # Per-workspace role (workspace_id → "viewer"|"contributor"|"editor"|"admin").
+    # Populated alongside project_ids by _resolve_projects. Admins synthesize
+    # an "admin" entry per active workspace so workspace-role predicates work
+    # uniformly. Used by tool-visibility predicates (see app/mcp/permissions.py)
+    # to decide whether the caller has any workspace where they could review
+    # or contribute, without re-querying the DB per tools/list call.
+    workspace_roles: dict[str, str] = field(default_factory=dict)
     is_admin: bool = False
     permissions: list[str] = field(default_factory=list)
+
+    # ------------------------------------------------------------------ #
+    # Predicate helpers — used by MCP tool-visibility middleware so the   #
+    # list_tools hook stays I/O-free.                                     #
+    # ------------------------------------------------------------------ #
+
+    def has_permission(self, perm: str) -> bool:
+        """True if `perm` is in the identity's resolved permission set."""
+        return perm in self.permissions
+
+    def has_any_permission(self, *perms: str) -> bool:
+        """True if any of `perms` is present."""
+        return any(p in self.permissions for p in perms)
+
+    def has_workspace_role_at_least(self, required: str) -> bool:
+        """True if the identity holds `required` or higher in any workspace.
+
+        Admins always qualify. Unknown roles are treated as not-qualifying.
+        """
+        if self.is_admin:
+            return True
+        if not self.workspace_roles:
+            return False
+        # Local import to avoid a circular at module load time.
+        from app.database.models import WORKSPACE_ROLE_HIERARCHY, WorkspaceRole
+        try:
+            required_level = WORKSPACE_ROLE_HIERARCHY[WorkspaceRole(required)]
+        except (ValueError, KeyError):
+            return False
+        for role in self.workspace_roles.values():
+            try:
+                if WORKSPACE_ROLE_HIERARCHY[WorkspaceRole(role)] >= required_level:
+                    return True
+            except (ValueError, KeyError):
+                continue
+        return False
+
+    def workspace_role(self, workspace_id) -> Optional[str]:
+        """Role string for `workspace_id` (str or UUID), or None if not a member.
+
+        Admins get "admin" implicitly for any workspace_id that is also in
+        `project_ids` (the active-workspace list); for arbitrary workspace_ids
+        admins still return None unless seeded — callers that need the admin
+        override should check `is_admin` directly.
+        """
+        return self.workspace_roles.get(str(workspace_id))
 
 
 class MCPAuthService:
@@ -131,10 +184,13 @@ class MCPAuthService:
         )
 
         permissions = get_effective_permissions(employee)
-        project_ids, project_source_ids = await self._resolve_projects(employee.id)
+        project_ids, project_source_ids, workspace_roles = await self._resolve_projects(employee.id)
 
-        # Admin gets unrestricted access
+        # Admin gets unrestricted access. Synthesize an "admin" workspace role
+        # for every active membership so workspace-role predicates short-circuit
+        # uniformly — the `is_admin` flag itself also gates this in helpers.
         if employee.role == "admin":
+            admin_roles = {wid: "admin" for wid in project_ids}
             return ResolvedIdentity(
                 employee_id=employee.id,
                 employee_name=employee.name,
@@ -142,6 +198,7 @@ class MCPAuthService:
                 department_name=employee.department.name if employee.department else "",
                 project_source_ids=project_source_ids,
                 project_ids=project_ids,
+                workspace_roles=admin_roles,
                 is_admin=True,
                 permissions=permissions,
             )
@@ -158,6 +215,7 @@ class MCPAuthService:
                 department_name=employee.department.name if employee.department else "",
                 project_source_ids=project_source_ids,
                 project_ids=project_ids,
+                workspace_roles=workspace_roles,
                 permissions=permissions,
             )
 
@@ -173,6 +231,7 @@ class MCPAuthService:
                 allowed_source_ids=allowed_ids,
                 project_source_ids=project_source_ids,
                 project_ids=project_ids,
+                workspace_roles=workspace_roles,
                 permissions=permissions,
             )
 
@@ -185,6 +244,7 @@ class MCPAuthService:
             allowed_source_ids=[],  # empty = no access
             project_source_ids=project_source_ids,
             project_ids=project_ids,
+            workspace_roles=workspace_roles,
             permissions=permissions,
         )
 
@@ -215,19 +275,21 @@ class MCPAuthService:
 
     async def _resolve_projects(
         self, employee_id: uuid.UUID,
-    ) -> tuple[list[str], list[str]]:
-        """Resolve workspace memberships into (project_ids, project_source_ids).
+    ) -> tuple[list[str], list[str], dict[str, str]]:
+        """Resolve workspace memberships into (project_ids, project_source_ids, roles).
 
         - project_ids: UUIDs (as strings) of every ACTIVE workspace the
           employee is a member of. Used by the wiki layer to include
           project-scoped wiki pages in search/list/read.
         - project_source_ids: source UUIDs linked to those workspaces.
+        - roles: workspace_id (str) → role string. Powers tool-visibility
+          predicates without an extra round-trip on every tools/list call.
         """
         from app.database.models import Project
 
-        # Active workspaces this user is a member of.
+        # Active workspaces this user is a member of, with the membership role.
         active_proj_stmt = (
-            select(ProjectMember.project_id)
+            select(ProjectMember.project_id, ProjectMember.role)
             .join(Project, Project.id == ProjectMember.project_id)
             .where(
                 ProjectMember.employee_id == employee_id,
@@ -235,10 +297,12 @@ class MCPAuthService:
             )
         )
         result = await self.db.execute(active_proj_stmt)
-        proj_uuids = [r[0] for r in result.all()]
+        rows = result.all()
+        proj_uuids = [r[0] for r in rows]
+        workspace_roles = {str(r[0]): r[1] for r in rows}
 
         if not proj_uuids:
-            return [], []
+            return [], [], {}
 
         project_ids = [str(p) for p in proj_uuids]
 
@@ -247,7 +311,7 @@ class MCPAuthService:
         )
         source_result = await self.db.execute(source_stmt)
         project_source_ids = [str(r[0]) for r in source_result.all()]
-        return project_ids, project_source_ids
+        return project_ids, project_source_ids, workspace_roles
 
     # --- Token Management ---
 

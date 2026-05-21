@@ -18,6 +18,13 @@ from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.mcp.logging import current_identity, logged_tool
+from app.mcp.permissions import (
+    ANY_AUTHENTICATED,
+    CAN_CONTRIBUTE_WIKI,
+    CAN_CREATE_WIKI_DIRECT,
+    CAN_REVIEW_WIKI,
+    kb_tool,
+)
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -218,7 +225,7 @@ def register_tools(mcp: FastMCP):
     # Wiki layer — synthesized markdown pages compiled from sources
     # =========================================================================
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("search_wiki", query_arg="query")
     async def search_wiki(query: str, top_k: int = 10) -> str:
         """
@@ -315,7 +322,7 @@ def register_tools(mcp: FastMCP):
             lines.append(oos_hint)
         return "\n".join(lines)
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("read_wiki_index")
     async def read_wiki_index() -> str:
         """
@@ -340,7 +347,7 @@ def register_tools(mcp: FastMCP):
             return "_(wiki index not initialized yet)_"
         return page.content_md
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("read_wiki_page", query_arg="slug")
     async def read_wiki_page(slug: str) -> str:
         """
@@ -447,7 +454,7 @@ def register_tools(mcp: FastMCP):
             )
         return body
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("list_wiki_pages")
     async def list_wiki_pages(
         page_type: Optional[str] = None,
@@ -508,7 +515,7 @@ def register_tools(mcp: FastMCP):
     # Raw source drill-down (PageIndex-inspired)
     # =========================================================================
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("get_source", query_arg="source_id")
     async def get_source(source_id: str) -> str:
         """
@@ -569,7 +576,7 @@ def register_tools(mcp: FastMCP):
             lines.append(f"- **Added:** {source.created_at.strftime('%Y-%m-%d %H:%M')}")
         return "\n".join(lines)
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("get_source_outline", query_arg="source_id")
     async def get_source_outline(source_id: str) -> str:
         """
@@ -621,7 +628,7 @@ def register_tools(mcp: FastMCP):
         _walk(outline)
         return "\n".join(lines)
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("get_source_pages", query_arg="source_id")
     async def get_source_pages(source_id: str, pages: str) -> str:
         """
@@ -681,7 +688,7 @@ def register_tools(mcp: FastMCP):
     # Source/Type browsing
     # =========================================================================
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("list_sources")
     async def list_sources(
         status: str = "ready",
@@ -747,7 +754,7 @@ def register_tools(mcp: FastMCP):
                 lines.append(f"- **{title}** (ID: `{s.id}`)")
         return "\n".join(lines)
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("list_knowledge_types")
     async def list_knowledge_types() -> str:
         """
@@ -793,7 +800,7 @@ def register_tools(mcp: FastMCP):
             return "No accessible knowledge types found for your scope."
         return "\n".join(lines)
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=ANY_AUTHENTICATED)
     @logged_tool("get_knowledge_type_docs", query_arg="knowledge_type_slug")
     async def get_knowledge_type_docs(knowledge_type_slug: str, limit: int = 10) -> str:
         """
@@ -849,7 +856,7 @@ def register_tools(mcp: FastMCP):
     # Tier 2 — Contribute (member-level, requires review)
     # =========================================================================
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_CONTRIBUTE_WIKI)
     @logged_tool("propose_wiki_edit", query_arg="slug")
     async def propose_wiki_edit(
         slug: str,
@@ -971,7 +978,7 @@ def register_tools(mcp: FastMCP):
     # Tier 3 — Direct Edit (editor/admin only, no review)
     # =========================================================================
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_CREATE_WIKI_DIRECT)
     @logged_tool("edit_wiki_page", query_arg="slug")
     async def edit_wiki_page(
         slug: str,
@@ -1073,7 +1080,7 @@ def register_tools(mcp: FastMCP):
     # Tier 4 — Review (editor/admin only)
     # =========================================================================
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_REVIEW_WIKI)
     @logged_tool("list_pending_drafts")
     async def list_pending_drafts(
         workspace_id: Optional[str] = None,
@@ -1163,7 +1170,7 @@ def register_tools(mcp: FastMCP):
             return "No pending drafts found."
         return f"**{len(lines)} pending draft(s):**\n\n" + "\n".join(lines)
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_REVIEW_WIKI)
     @logged_tool("review_draft", query_arg="draft_id")
     async def review_draft(draft_id: str) -> str:
         """
@@ -1228,7 +1235,7 @@ def register_tools(mcp: FastMCP):
             f"### Current page content (v{page.version})\n\n{page.content_md or '_(empty)_'}"
         )
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_REVIEW_WIKI)
     @logged_tool("approve_draft", query_arg="draft_id")
     async def approve_draft(
         draft_id: str,
@@ -1329,7 +1336,7 @@ def register_tools(mcp: FastMCP):
 
         return f"Draft `{draft_id}` approved. Page `{page.slug}` updated to v{page.version}."
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_REVIEW_WIKI)
     @logged_tool("reject_draft", query_arg="draft_id")
     async def reject_draft(draft_id: str, reviewer_note: str) -> str:
         """
@@ -1398,7 +1405,7 @@ def register_tools(mcp: FastMCP):
     # Tier 5 — needs_revision flow (request changes / resubmit / withdraw)
     # =========================================================================
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_REVIEW_WIKI)
     @logged_tool("request_changes_on_draft", query_arg="draft_id")
     async def request_changes_on_draft(draft_id: str, reviewer_note: str) -> str:
         """
@@ -1470,7 +1477,7 @@ def register_tools(mcp: FastMCP):
             f"The author can resubmit when ready."
         )
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_CONTRIBUTE_WIKI)
     @logged_tool("resubmit_draft", query_arg="draft_id")
     async def resubmit_draft(
         draft_id: str,
@@ -1538,7 +1545,7 @@ def register_tools(mcp: FastMCP):
             "Reviewers have been notified."
         )
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_CONTRIBUTE_WIKI)
     @logged_tool("withdraw_draft", query_arg="draft_id")
     async def withdraw_draft(draft_id: str) -> str:
         """
@@ -1598,7 +1605,7 @@ def register_tools(mcp: FastMCP):
     # Tier 6 — Create new pages (propose for contributors, direct for editors)
     # =========================================================================
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_CONTRIBUTE_WIKI)
     @logged_tool("propose_wiki_create", query_arg="slug")
     async def propose_wiki_create(
         slug: str,
@@ -1724,7 +1731,7 @@ def register_tools(mcp: FastMCP):
             f"Note: {note or '(none)'}"
         )
 
-    @mcp.tool()
+    @kb_tool(mcp, requires=CAN_CREATE_WIKI_DIRECT)
     @logged_tool("create_wiki_page", query_arg="slug")
     async def create_wiki_page(
         slug: str,
