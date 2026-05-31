@@ -442,6 +442,7 @@ Strategy: {strategy}
 
 ## KB reconciliation results
 {kb_reconciliation}
+
 {user_note_section}
 Produce a JSON compilation plan:
 
@@ -457,7 +458,6 @@ Produce a JSON compilation plan:
       "priority": 1
     }}
   ],
-  "source_page_slug": "source/short-doc-slug",
   "estimated_page_count": 5,
   "compilation_notes": "any important notes for the compiler"
 }}
@@ -466,8 +466,6 @@ Rules:
 - action must be "CREATE" or "UPDATE"
 - For UPDATE, slug must be an existing wiki page slug (from KB reconciliation above)
 - For CREATE general wiki pages (page_type="concept"), slug must be the flat, lowercase, hyphenated topic name (e.g. "pgvector", "mcp-server"). Do NOT prepend concept/ or any other category prefix.
-- For CREATE source pages (page_type="source"), slug must start with "source/" followed by the lowercase, hyphenated source title (e.g. "source/short-doc-slug").
-- Always include exactly one page with page_type "source" for the document itself.
 - Group closely related small topics onto the same page if they belong together (max 3-4 per page).
 - priority 1 = highest importance (process first)
 - entity_names must match the terms in the topics list above

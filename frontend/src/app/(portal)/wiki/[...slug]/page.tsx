@@ -40,6 +40,8 @@ export default function WikiPageViewer() {
 
   const slugParts = Array.isArray(params.slug) ? params.slug : [params.slug ?? ""];
   const fullSlug = slugParts.join("/");
+  const isSourceView = slugParts[0] === "source" && slugParts.length === 2;
+  const sourceId = isSourceView ? slugParts[1] : null;
   const scopeType = searchParams.get("scopeType") || undefined;
   const scopeId = searchParams.get("scopeId") || undefined;
   const isScoped = !!scopeType && scopeType !== "global";
@@ -80,6 +82,8 @@ export default function WikiPageViewer() {
   }, [isScoped, scopeType, scopeId, scopes]);
 
   const [page, setPage] = React.useState<WikiPageDetail | null>(null);
+  const [sourceData, setSourceData] = React.useState<any | null>(null);
+  const [citations, setCitations] = React.useState<any[]>([]);
   const [notFound, setNotFound] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [searchOpen, setSearchOpen] = React.useState(false);
@@ -182,18 +186,72 @@ export default function WikiPageViewer() {
     setLoading(true);
     setNotFound(false);
     setPage(null);
+    setSourceData(null);
     setMode("view");
 
-    const scopeParams = isScoped ? `?scope_type=${scopeType}&scope_id=${scopeId}` : "";
-    api<WikiPageDetail>(`/api/wiki/pages/${encodeURIComponent(fullSlug)}${scopeParams}`)
-      .then((data) => setPage(data))
-      .catch((err) => {
-        if (err?.status === 404 || err?.message?.includes("404")) {
-          setNotFound(true);
-        }
-      })
-      .finally(() => setLoading(false));
-  }, [fullSlug, scopeType, scopeId, isScoped]);
+    if (isSourceView && sourceId) {
+      api<any>(`/api/sources/${sourceId}`)
+        .then((data) => {
+          setSourceData(data);
+          // Provision a dummy page to satisfy the breadcrumbs and right sidebar metadata layout
+          setPage({
+            slug: fullSlug,
+            title: data.title || data.file_name || "Tài liệu",
+            page_type: "source",
+            status: "evergreen",
+            summary: "",
+            knowledge_type_slugs: [],
+            source_ids: [sourceId],
+            version: 1,
+            updated_at: data.updated_at || new Date().toISOString(),
+            content_md: "",
+            backlinks: [],
+            outlinks: [],
+          });
+        })
+        .catch((err) => {
+          if (err?.status === 404 || err?.message?.includes("404")) {
+            setNotFound(true);
+          }
+        })
+        .finally(() => setLoading(false));
+    } else {
+      const scopeParams = isScoped ? `?scope_type=${scopeType}&scope_id=${scopeId}` : "";
+      api<WikiPageDetail>(`/api/wiki/pages/${encodeURIComponent(fullSlug)}${scopeParams}`)
+        .then((data) => setPage(data))
+        .catch((err) => {
+          if (err?.status === 404 || err?.message?.includes("404")) {
+            setNotFound(true);
+          }
+        })
+        .finally(() => setLoading(false));
+    }
+  }, [fullSlug, scopeType, scopeId, isScoped, isSourceView, sourceId]);
+
+  // Load parallel citations (sources metadata) for page references
+  React.useEffect(() => {
+    if (page && !isSourceView && page.source_ids && page.source_ids.length > 0) {
+      Promise.all(
+        page.source_ids.map((id) =>
+          api<any>(`/api/sources/${id}`).catch(() => null)
+        )
+      ).then((res) => {
+        setCitations(res.filter(Boolean));
+      });
+    } else {
+      setCitations([]);
+    }
+  }, [page, isSourceView]);
+
+  // Dynamically inject standard Markdown footnote definitions at rendering time
+  const contentWithFootnotes = React.useMemo(() => {
+    if (!page || isSourceView || !citations.length) return page?.content_md || "";
+    let append = "\n\n---\n\n";
+    citations.forEach((c, idx) => {
+      append += `[^${idx + 1}]: [${c.title || c.file_name}](/wiki/source/${c.id})\n`;
+    });
+    return page.content_md + append;
+  }, [page, citations, isSourceView]);
 
   // ---------------------------------------------------------------------------
   // Load pending drafts (editors/admins only, after page loaded)
@@ -520,8 +578,142 @@ export default function WikiPageViewer() {
                   onSave={canEdit ? handleSaveEdit : handleSaveProposal}
                   onCancel={() => setMode("view")}
                 />
+              ) : isSourceView && sourceData ? (
+                <div className="space-y-6">
+                  {/* File information bar */}
+                  <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl border bg-card/50 shadow-sm">
+                    <div className="flex items-center gap-3">
+                      <span className="material-symbols-outlined text-4xl text-primary shrink-0">
+                        {sourceData.source_type === "url" ? "language" : "description"}
+                      </span>
+                      <div className="min-w-0">
+                        <h3 className="font-semibold text-foreground text-sm line-clamp-1 truncate max-w-[400px]">
+                          {sourceData.title || sourceData.file_name}
+                        </h3>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {sourceData.source_type === "url" ? (
+                            <a href={sourceData.url} target="_blank" rel="noopener noreferrer" className="hover:underline flex items-center gap-1">
+                              {sourceData.url}
+                              <span className="material-symbols-outlined text-[10px]">open_in_new</span>
+                            </a>
+                          ) : (
+                            `Dung lượng: ${((sourceData.file_size || 0) / 1024 / 1024).toFixed(2)} MB`
+                          )}
+                          {sourceData.contributed_by_name && ` • Đăng bởi: ${sourceData.contributed_by_name}`}
+                        </p>
+                      </div>
+                    </div>
+
+                    {sourceData.download_url && (
+                      <Button
+                        onClick={() => window.open(sourceData.download_url, "_blank")}
+                        className="gap-2 shrink-0 shadow-sm hover:scale-[1.02] active:scale-[0.98] transition-all"
+                      >
+                        <span className="material-symbols-outlined text-sm">cloud_download</span>
+                        Tải tài liệu gốc
+                      </Button>
+                    )}
+                  </div>
+
+                  {/* Document Viewer Frame */}
+                  <div className="border border-border rounded-2xl overflow-hidden shadow-sahara bg-card/30">
+                    {sourceData.source_type === "file" && sourceData.download_url ? (
+                      sourceData.file_name?.toLowerCase().endsWith(".pdf") ? (
+                        <iframe
+                          src={`${sourceData.download_url}#toolbar=1`}
+                          className="w-full h-[700px] bg-background border-none"
+                          title={sourceData.title || sourceData.file_name}
+                        />
+                      ) : sourceData.file_name?.toLowerCase().match(/\.(jpg|jpeg|png|gif|webp)$/) ? (
+                        <div className="flex items-center justify-center p-8 bg-black/[0.02] min-h-[400px]">
+                          <img
+                            src={sourceData.download_url}
+                            alt={sourceData.title || sourceData.file_name}
+                            className="max-w-full max-h-[600px] object-contain rounded-lg border shadow-md"
+                          />
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center justify-center p-12 text-center text-sm text-muted-foreground gap-3 min-h-[300px]">
+                          <span className="material-symbols-outlined text-4xl text-muted-foreground/60">draft</span>
+                          <div className="font-semibold text-foreground">Không thể xem trước định dạng này trực tiếp</div>
+                          <p className="text-xs max-w-sm">Tài liệu "{sourceData.file_name}" không thuộc định dạng PDF hoặc hình ảnh để nhúng. Vui lòng bấm Tải tài liệu gốc để đọc.</p>
+                        </div>
+                      )
+                    ) : sourceData.source_type === "url" ? (
+                      <div className="flex flex-col items-center justify-center p-12 text-center text-sm text-muted-foreground gap-4 min-h-[350px]">
+                        <span className="material-symbols-outlined text-5xl text-primary/60">language</span>
+                        <div>
+                          <div className="font-semibold text-foreground text-base">Liên kết tài liệu gốc (Website Source)</div>
+                          <p className="text-xs max-w-md mt-1">Đây là một liên kết ngoài. Bạn có thể mở trực tiếp trang web để đọc toàn văn tài liệu.</p>
+                        </div>
+                        <Button
+                          variant="outline"
+                          onClick={() => window.open(sourceData.url, "_blank")}
+                          className="gap-2"
+                        >
+                          <span className="material-symbols-outlined text-sm">open_in_new</span>
+                          Mở trang Web gốc
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center p-12 text-center text-sm text-muted-foreground gap-2 min-h-[300px]">
+                        <span className="material-symbols-outlined text-4xl">hourglass_empty</span>
+                        <div>Tài liệu không có tệp đính kèm hoặc đang xử lý.</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : (
-                <WikiContent markdown={page.content_md} linkSuffix={scopeLinkSuffix} />
+                <div className="space-y-6">
+                  <WikiContent markdown={contentWithFootnotes} linkSuffix={scopeLinkSuffix} />
+
+                  {/* References card deck section at bottom of concept pages */}
+                  {citations.length > 0 && (
+                    <div className="mt-12 pt-8 border-t border-border">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-4 flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-sm">description</span>
+                        Tài liệu tham khảo ({citations.length})
+                      </h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {citations.map((c, idx) => (
+                          <div key={c.id} className="rounded-xl border bg-card p-4 flex flex-col justify-between shadow-sm hover:shadow-md transition-shadow">
+                            <div>
+                              <div className="flex items-center gap-1 text-[10px] text-muted-foreground/80 font-mono font-semibold mb-1 bg-black/[0.02] border rounded px-1.5 py-0.5 w-fit">
+                                <span>Trích dẫn [{idx + 1}]</span>
+                              </div>
+                              <h4 className="font-semibold text-sm line-clamp-2 text-foreground" title={c.title || c.file_name}>
+                                {c.title || c.file_name}
+                              </h4>
+                              <p className="text-[10px] text-muted-foreground mt-1">
+                                {c.source_type === "url" ? "Liên kết Web" : `File • ${((c.file_size || 0) / 1024 / 1024).toFixed(2)} MB`}
+                              </p>
+                            </div>
+                            <div className="flex gap-2 mt-4 pt-3 border-t">
+                              <Link
+                                href={`/wiki/source/${c.id}${scopeLinkSuffix}`}
+                                className="inline-flex items-center gap-1 text-xs text-primary font-medium hover:underline"
+                              >
+                                <span className="material-symbols-outlined text-xs">visibility</span>
+                                Xem tài liệu →
+                              </Link>
+                              {c.download_url && (
+                                <a
+                                  href={c.download_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground font-medium hover:underline ml-auto"
+                                >
+                                  <span className="material-symbols-outlined text-xs">cloud_download</span>
+                                  Tải xuống
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           ) : null}
