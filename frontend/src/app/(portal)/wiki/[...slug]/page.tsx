@@ -455,7 +455,7 @@ export default function WikiPageViewer() {
         {/* Center: Content */}
         <div className="flex-1 overflow-y-auto min-w-0">
           {loading ? (
-            <div className="max-w-3xl mx-auto px-8 py-8">
+            <div className="px-4 py-8">
               <div className="flex items-center gap-2 mb-4">
                 <div className="h-4 w-16 rounded bg-muted animate-pulse" />
                 <div className="h-4 w-4 text-muted-foreground">/</div>
@@ -483,7 +483,7 @@ export default function WikiPageViewer() {
               />
             </div>
           ) : page ? (
-            <div className="max-w-3xl mx-auto px-8 py-8">
+            <div className="px-4 py-8">
               {/* Breadcrumb & Back Button — project scope returns to /workspaces,
                   department scope returns to /wiki with that department's scope
                   preserved so the user lands on the dept's tree+index. */}
