@@ -14,7 +14,13 @@ import { wikiTypeGroupLabel } from "@/components/wiki/wiki-type-badge";
 import { WikiSearchDialog } from "@/components/wiki/wiki-search-dialog";
 import { WikiScopeSwitcher } from "@/components/wiki/wiki-scope-switcher";
 import { WikiCreatePageDialog } from "@/components/wiki/wiki-create-page-dialog";
-import { WikiStatusBadge } from "@/components/wiki/wiki-status-badge";
+import { WikiStatusBadge, WikiStatus } from "@/components/wiki/wiki-status-badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { WikiScope } from "@/types/wiki";
 import { EmptyState } from "@/components/shared/empty-state";
 import { PageHeader } from "@/components/shared/page-header";
@@ -521,13 +527,43 @@ export default function WikiPageViewer() {
                     <h1 className="font-heading text-4xl font-normal leading-tight text-foreground">
                       {page.title}
                     </h1>
-                    {page.page_type !== "index" && page.page_type !== "log" && page.page_type !== "hot" && (
-                      <WikiStatusBadge status={page.status} className="mt-1 shrink-0" />
+                    {page.page_type !== "index" && page.page_type !== "log" && page.page_type !== "hot" && page.page_type !== "source" && (
+                      (canEdit) ? (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger className="cursor-pointer">
+                              <WikiStatusBadge status={page.status} className="mt-1 shrink-0" />
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start">
+                            {(["seed", "developing", "mature", "evergreen"] as WikiStatus[]).map((s) => (
+                              <DropdownMenuItem
+                                key={s}
+                                onClick={async () => {
+                                  try {
+                                    const qs = scopeType ? `?scope_type=${scopeType}&scope_id=${scopeId}` : "";
+                                    await api(`/api/wiki/pages/${page.slug}/status${qs}`, {
+                                      method: "PATCH",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ status: s }),
+                                    });
+                                    setPage((prev) => prev ? { ...prev, status: s } : prev);
+                                  } catch {}
+                                }}
+                                disabled={page.status === s}
+                                className="gap-2"
+                              >
+                                <WikiStatusBadge status={s} />
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      ) : (
+                        <WikiStatusBadge status={page.status} className="mt-1 shrink-0" />
+                      )
                     )}
                   </div>
                 </div>
 
-                {mode === "view" && (canEdit || canPropose) && (
+                {mode === "view" && !isSourceView && (canEdit || canPropose) && (
                   <Button
                     variant="outline"
                     size="sm"

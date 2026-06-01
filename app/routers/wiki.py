@@ -453,6 +453,56 @@ async def direct_create_wiki_page(
     return _detail(page, backlinks, outlinks)
 
 
+class WikiPageStatusUpdate(BaseModel):
+    status: str
+
+
+@router.patch("/wiki/pages/{slug:path}/status")
+async def update_wiki_page_status(
+    slug: str,
+    body: WikiPageStatusUpdate,
+    scope_type: Optional[str] = Query(None),
+    scope_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: Employee = Depends(get_current_user),
+):
+    """Update the lifecycle status of a wiki page (seed/developing/mature/evergreen)."""
+    valid_statuses = {"seed", "developing", "mature", "evergreen"}
+    if body.status not in valid_statuses:
+        raise HTTPException(400, f"Invalid status. Must be one of: {valid_statuses}")
+
+    if slug in (wiki_service.INDEX_SLUG, wiki_service.LOG_SLUG, wiki_service.HOT_SLUG):
+        raise HTTPException(400, "Cannot update status of reserved pages")
+
+    sid = uuid.UUID(scope_id) if scope_id else None
+    if scope_type:
+        page = await wiki_service.get_page_by_slug(
+            db, slug, scope_type=scope_type, scope_id=sid,
+        )
+    else:
+        page = await wiki_service.get_page_by_slug(db, slug, scope_type="global", scope_id=None)
+        if not page:
+            page = await wiki_service.get_page_by_slug_any_scope(db, slug)
+    if not page:
+        raise HTTPException(404, f"Wiki page not found: {slug}")
+
+    # Permission: same as direct edit
+    if user.role != "admin":
+        if page.scope_type == "project" and page.scope_id:
+            member_role = await get_workspace_role(db, user, page.scope_id)
+            if not member_role or not workspace_role_can(member_role, "editor"):
+                raise HTTPException(403, "Requires editor role or above in this workspace")
+        else:
+            perms = _get_user_permissions(user)
+            if "wiki:write:all" not in perms:
+                raise HTTPException(403, "Requires wiki:write:all permission")
+
+    page.status = body.status
+    await db.commit()
+    await db.refresh(page)
+    return {"slug": page.slug, "status": page.status}
+
+
 @router.put("/wiki/pages/{slug:path}", response_model=WikiPageDetail)
 async def direct_edit_wiki_page(
     slug: str,

@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -62,6 +63,7 @@ export function KnowledgeTable({
   const [reviewExtractionSource, setReviewExtractionSource] = React.useState<Source | null>(null);
   const [retryingIds, setRetryingIds] = React.useState<Set<string>>(new Set());
   const [searchInput, setSearchInput] = React.useState(search);
+  const router = useRouter();
 
   const handleDelete = async (id: string) => {
     if (!confirm("Delete this document? This cannot be undone.")) return;
@@ -265,6 +267,24 @@ export function KnowledgeTable({
                         <span className="material-symbols-outlined text-base">more_vert</span>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => router.push(`/wiki/source/${source.id}`)}>
+                          <span className="material-symbols-outlined mr-2" style={{ fontSize: 16 }}>visibility</span>
+                          View
+                        </DropdownMenuItem>
+                        {source.status === "ready" && (
+                          <DropdownMenuItem
+                            onClick={async () => {
+                              try {
+                                const detail = await api<{ download_url?: string }>(`/api/sources/${source.id}`);
+                                if (detail.download_url) window.open(detail.download_url, "_blank");
+                              } catch {}
+                            }}
+                          >
+                            <span className="material-symbols-outlined mr-2" style={{ fontSize: 16 }}>cloud_download</span>
+                            Download
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={() => setEditSource(source)}>
                           <span className="material-symbols-outlined mr-2" style={{ fontSize: 16 }}>edit</span>
                           Edit
