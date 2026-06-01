@@ -195,6 +195,7 @@ from app.routers import (  # noqa: E402
     skills,
     sources,
     wiki,
+    wiki_branches,
     wiki_drafts,
     wiki_images,
 )
@@ -204,6 +205,7 @@ app.include_router(oauth.router, prefix="/oauth", tags=["oauth"])
 app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
 app.include_router(notes.router, prefix="/api", tags=["notes"])
+app.include_router(wiki_branches.router, prefix="/api", tags=["wiki-branches"])
 app.include_router(wiki_drafts.router, prefix="/api", tags=["wiki-drafts"])
 app.include_router(wiki.router, prefix="/api", tags=["wiki"])
 app.include_router(wiki_images.router, prefix="/api", tags=["wiki"])

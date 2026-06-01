@@ -87,7 +87,7 @@ export default function WikiReviewPage() {
   // already-loaded drafts list — no extra API call needed.
   const scopeKey = searchParams.get("scope") || "";
 
-  const [drafts, setDrafts] = React.useState<DraftResponse[]>([]);
+  const [drafts, setDrafts] = React.useState<any[]>([]); // holds branches list
   const [loading, setLoading] = React.useState(true);
   const [helpOpen, setHelpOpen] = React.useState(false);
   // Snapshot of the current page content for the active draft (loaded on demand).
@@ -102,6 +102,10 @@ export default function WikiReviewPage() {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const noteRef = React.useRef<HTMLTextAreaElement>(null);
+
+  const [selectedBranch, setSelectedBranch] = React.useState<any | null>(null);
+  const [branchDrafts, setBranchDrafts] = React.useState<DraftResponse[]>([]);
+  const [activeDraftIdx, setActiveDraftIdx] = React.useState<number>(0);
 
   // ---------- URL helpers ----------
 
@@ -124,10 +128,16 @@ export default function WikiReviewPage() {
     setLoading(true);
     try {
       const qs = new URLSearchParams();
-      qs.set("status", status);
-      qs.set("limit", "200");
+      const branchStatusMap: Record<string, string> = {
+        pending: "pending_merge",
+        needs_revision: "draft",
+        approved: "merged",
+        rejected: "closed",
+      };
+      const targetStatus = branchStatusMap[status] || "pending_merge";
+      qs.set("status", targetStatus);
       if (scopeMode === "mine") qs.set("mine", "true");
-      const rows = await api<DraftResponse[]>(`/api/wiki/drafts?${qs.toString()}`);
+      const rows = await api<any[]>(`/api/wiki/branches?${qs.toString()}`);
       const list = Array.isArray(rows) ? rows : [];
       setDrafts(list);
       // If current selection isn't in this list, snap to the first item.
@@ -141,8 +151,6 @@ export default function WikiReviewPage() {
     } finally {
       setLoading(false);
     }
-    // selectedId intentionally excluded — load runs on filter changes, not on
-    // every selection change. Selection-driven URL writeback uses updateUrl.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, scopeMode]);
 
@@ -158,14 +166,11 @@ export default function WikiReviewPage() {
   const scopeOptions = React.useMemo(() => {
     const seen = new Map<string, { key: string; label: string }>();
     for (const d of drafts) {
-      const type = d.page_scope_type || "global";
-      const id = d.page_scope_id || "";
+      const type = d.scope_type || "global";
+      const id = d.scope_id || "";
       const key = type === "global" ? "global" : `${type}:${id}`;
       if (seen.has(key)) continue;
-      const label =
-        type === "global"
-          ? "Global"
-          : `${d.page_scope_name || id}${d.page_scope_name ? "" : ""} · ${type}`;
+      const label = type === "global" ? "Global" : `Scope: ${type}`;
       seen.set(key, { key, label });
     }
     const arr = Array.from(seen.values());
@@ -180,8 +185,8 @@ export default function WikiReviewPage() {
   const filteredDrafts = React.useMemo(() => {
     if (!scopeKey) return drafts;
     return drafts.filter((d) => {
-      const type = d.page_scope_type || "global";
-      const id = d.page_scope_id || "";
+      const type = d.scope_type || "global";
+      const id = d.scope_id || "";
       const key = type === "global" ? "global" : `${type}:${id}`;
       return key === scopeKey;
     });
@@ -199,15 +204,34 @@ export default function WikiReviewPage() {
 
   // ---------- Active draft + page content ----------
 
-  const activeDraft = React.useMemo(() => {
+  const activeBranch = React.useMemo(() => {
     if (!selectedId) return filteredDrafts[0] ?? null;
     return filteredDrafts.find((d) => d.id === selectedId) ?? filteredDrafts[0] ?? null;
   }, [filteredDrafts, selectedId]);
 
-  // When active draft has a fresh liveDraft snapshot (same id), prefer it for
-  // AI status. Falls back to the list row otherwise.
-  const draft =
-    liveDraft && activeDraft && liveDraft.id === activeDraft.id ? liveDraft : activeDraft;
+  React.useEffect(() => {
+    if (!selectedId) {
+      setSelectedBranch(null);
+      setBranchDrafts([]);
+      return;
+    }
+    setPageContentLoading(true);
+    api<any>(`/api/wiki/branches/${selectedId}`)
+      .then((b) => {
+        setSelectedBranch(b);
+        setBranchDrafts(b.drafts || []);
+        setActiveDraftIdx(0);
+      })
+      .catch(() => {
+        setSelectedBranch(null);
+        setBranchDrafts([]);
+      })
+      .finally(() => {
+        setPageContentLoading(false);
+      });
+  }, [selectedId]);
+
+  const draft = branchDrafts[activeDraftIdx] || null;
 
   // Reset state when active draft changes.
   React.useEffect(() => {
@@ -297,58 +321,54 @@ export default function WikiReviewPage() {
   }, [draft, filteredDrafts, activeIdx, updateUrl, resetForm]);
 
   const handleApprove = React.useCallback(async () => {
-    if (!draft) return;
+    if (!selectedBranch) return;
     setBusy(true);
     setError(null);
     try {
-      await api(`/api/wiki/drafts/${draft.id}/approve`, {
+      await api(`/api/wiki/branches/${selectedBranch.id}/merge`, {
         method: "POST",
-        body: { allow_conflict: draft.has_conflict ? true : undefined },
+        body: { reviewer_note: note || undefined },
       });
       advanceAfterAction();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Approve failed");
+      setError(err instanceof Error ? err.message : "Hợp nhất nhánh thất bại");
     } finally {
       setBusy(false);
     }
-  }, [draft, advanceAfterAction]);
+  }, [selectedBranch, note, advanceAfterAction]);
 
   const handleNoteSubmit = React.useCallback(async () => {
-    if (!draft || !actionMode || actionMode === "approve") return;
+    if (!selectedBranch || !actionMode || actionMode === "approve") return;
     if (note.trim().length < MIN_NOTE_LENGTH) {
-      setError(`Please write at least ${MIN_NOTE_LENGTH} characters.`);
+      setError(`Vui lòng nhập ít nhất ${MIN_NOTE_LENGTH} ký tự.`);
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      const endpoint =
-        actionMode === "reject"
-          ? `/api/wiki/drafts/${draft.id}/reject`
-          : `/api/wiki/drafts/${draft.id}/request-changes`;
-      await api(endpoint, { method: "POST", body: { reviewer_note: note } });
+      await api(`/api/wiki/branches/${selectedBranch.id}/close`, { method: "POST" });
       advanceAfterAction();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Action failed");
+      setError(err instanceof Error ? err.message : "Thao tác thất bại");
     } finally {
       setBusy(false);
     }
-  }, [draft, actionMode, note, advanceAfterAction]);
+  }, [selectedBranch, actionMode, note, advanceAfterAction]);
 
   const handleWithdraw = React.useCallback(async () => {
-    if (!draft) return;
-    if (!window.confirm("Withdraw this draft? It will be removed from the review queue.")) return;
+    if (!selectedBranch) return;
+    if (!window.confirm("Bạn có chắc chắn muốn hủy bỏ nhánh đóng góp này không?")) return;
     setBusy(true);
     setError(null);
     try {
-      await api(`/api/wiki/drafts/${draft.id}/withdraw`, { method: "POST" });
+      await api(`/api/wiki/branches/${selectedBranch.id}/close`, { method: "POST" });
       advanceAfterAction();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Withdraw failed");
+      setError(err instanceof Error ? err.message : "Hủy nhánh thất bại");
     } finally {
       setBusy(false);
     }
-  }, [draft, advanceAfterAction]);
+  }, [selectedBranch, advanceAfterAction]);
 
   // ---------- Keyboard shortcuts ----------
 
@@ -519,7 +539,7 @@ export default function WikiReviewPage() {
           ) : (
             <ul className="divide-y divide-border">
               {filteredDrafts.map((d) => {
-                const active = draft?.id === d.id;
+                const active = selectedId === d.id;
                 return (
                   <li key={d.id}>
                     <button
@@ -530,40 +550,23 @@ export default function WikiReviewPage() {
                       }`}
                     >
                       <div className="flex items-center gap-1.5 mb-0.5">
-                        {d.draft_kind === "create" && (
-                          <span className="text-[9px] uppercase tracking-wide px-1 py-px rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-200">
-                            new
-                          </span>
-                        )}
                         {d.has_conflict && (
                           <span className="text-[9px] uppercase tracking-wide px-1 py-px rounded bg-destructive/15 text-destructive">
                             conflict
                           </span>
                         )}
                         <p className="text-sm font-medium truncate flex-1">
-                          {d.page_title || d.page_slug}
+                          {d.name}
                         </p>
                       </div>
                       <p className="text-[11px] text-muted-foreground font-mono truncate">
-                        {d.page_slug}
-                        {d.page_scope_type && d.page_scope_type !== "global" && (
-                          <span className="ml-1 font-sans">· {d.page_scope_type}{d.page_scope_name ? `:${d.page_scope_name}` : ""}</span>
-                        )}
+                        {d.scope_type} · {d.draft_count} files changed
                       </p>
                       <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground">
                         <span>{d.author_name || "?"}</span>
                         <span>·</span>
                         <span>{relativeTime(d.created_at)}</span>
-                        {(d.revision_round ?? 0) > 0 && (
-                          <>
-                            <span>·</span>
-                            <span>r{(d.revision_round ?? 0) + 1}</span>
-                          </>
-                        )}
                       </div>
-                      <span className={`mt-1 inline-block text-[9px] uppercase tracking-wide px-1 py-px rounded ${aiBadgeClass(d.ai_check_status)}`}>
-                        AI: {d.ai_check_status}
-                      </span>
                     </button>
                   </li>
                 );
@@ -588,47 +591,50 @@ export default function WikiReviewPage() {
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <h1 className="text-base font-semibold flex items-center gap-2 flex-wrap">
-                    {isCreate && (
-                      <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-200">
-                        new page
-                      </span>
-                    )}
-                    <span className="truncate">{draft.page_title || draft.page_slug}</span>
-                    {draft.has_conflict && (
-                      <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-destructive/15 text-destructive">
-                        conflict — base v{draft.base_version ?? "?"} → page v{draft.page_version}
-                      </span>
-                    )}
+                    <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-200">
+                      Nhánh đóng góp
+                    </span>
+                    <span className="truncate">{selectedBranch?.name}</span>
                   </h1>
-                  <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                    {draft.page_slug}
-                    {draft.page_scope_type && draft.page_scope_type !== "global" && (
-                      <span className="ml-2 font-sans">
-                        · {draft.page_scope_type}{draft.page_scope_name ? ` · ${draft.page_scope_name}` : ""}
-                      </span>
-                    )}
-                    {draft.page_slug && !isCreate && (
-                      <>
-                        {" · "}
-                        <Link
-                          href={`/wiki/${draft.page_slug}${
-                            draft.page_scope_type !== "global"
-                              ? `?scopeType=${draft.page_scope_type}${draft.page_scope_id ? `&scopeId=${draft.page_scope_id}` : ""}`
-                              : ""
-                          }`}
-                          className="font-sans hover:underline text-primary"
-                          target="_blank"
-                        >
-                          open page ↗
-                        </Link>
-                      </>
-                    )}
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {selectedBranch?.description || "Không có mô tả nhánh."}
                   </p>
                 </div>
                 <div className="text-[11px] text-muted-foreground tabular-nums shrink-0">
                   {activeIdx + 1} / {filteredDrafts.length}
                 </div>
               </div>
+
+              {selectedBranch?.has_conflict && (
+                <div className="mt-3 p-3 rounded-xl border border-rose-200 bg-rose-50 text-xs text-rose-700 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-sm">warning</span>
+                  <span><strong>Xung đột phát hiện:</strong> Nhánh này có thay đổi bị xung đột với Wiki chính. Tác giả cần thực hiện rebase nhánh trước khi hợp nhất.</span>
+                </div>
+              )}
+
+              {/* Files changed tabs selector */}
+              {branchDrafts.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-2 items-center">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Tập tin thay đổi ({branchDrafts.length}):</span>
+                  {branchDrafts.map((d, idx) => (
+                    <button
+                      key={d.id}
+                      onClick={() => setActiveDraftIdx(idx)}
+                      className={`px-2.5 py-1 rounded text-xs transition-all cursor-pointer font-medium border flex items-center gap-1.5 ${
+                        activeDraftIdx === idx
+                          ? "bg-primary/10 border-primary text-primary"
+                          : "border-border bg-background hover:bg-muted text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <span className="material-symbols-outlined text-[12px]">
+                        {d.draft_kind === "create" ? "add_box" : "edit"}
+                      </span>
+                      {d.page_title || d.page_slug}
+                      {d.has_conflict && <span className="w-1.5 h-1.5 rounded-full bg-destructive animate-pulse" />}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {/* Tab toggle */}
               <div className="flex gap-1 mt-3">
@@ -849,12 +855,12 @@ export default function WikiReviewPage() {
                   <Button
                     size="sm"
                     onClick={handleApprove}
-                    disabled={busy}
+                    disabled={busy || selectedBranch?.has_conflict}
                     className="w-full justify-between"
                   >
                     <span className="inline-flex items-center gap-1.5">
                       <span className="material-symbols-outlined text-sm">check_circle</span>
-                      Approve
+                      Approve & Merge
                     </span>
                     <kbd className="text-[10px] opacity-70">A</kbd>
                   </Button>

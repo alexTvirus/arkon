@@ -381,6 +381,44 @@ class WikiLink(Base):
     )
 
 
+class WikiBranch(Base):
+    """
+    Named contribution branch grouping multiple page drafts.
+    """
+    __tablename__ = "wiki_branches"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="global")
+    scope_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    author_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("employees.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    has_conflict: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reviewer_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("employees.id", ondelete="SET NULL"), nullable=True
+    )
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewer_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    author: Mapped["Employee"] = relationship("Employee", foreign_keys=[author_id])
+    reviewer: Mapped[Optional["Employee"]] = relationship("Employee", foreign_keys=[reviewer_id])
+    drafts: Mapped[list["WikiPageDraft"]] = relationship(
+        "WikiPageDraft", back_populates="branch", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_wiki_branches_author_id", "author_id"),
+        Index("ix_wiki_branches_status", "status"),
+    )
+
+
 class WikiPageDraft(Base):
     """
     Pending contribution proposed by a workspace member.
@@ -424,6 +462,9 @@ class WikiPageDraft(Base):
     # web_ui | mcp_claude_desktop | mcp_claude_code | mcp_other | api_direct
     source: Mapped[str] = mapped_column(String(40), nullable=False, default="web_ui")
     source_metadata: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    branch_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("wiki_branches.id", ondelete="CASCADE"), nullable=True
+    )
     reviewed_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("employees.id", ondelete="SET NULL"), nullable=True
     )
@@ -437,11 +478,13 @@ class WikiPageDraft(Base):
     page: Mapped["WikiPage"] = relationship("WikiPage", foreign_keys=[page_id])
     author: Mapped[Optional["Employee"]] = relationship("Employee", foreign_keys=[author_id])
     reviewer: Mapped[Optional["Employee"]] = relationship("Employee", foreign_keys=[reviewed_by_id])
+    branch: Mapped[Optional["WikiBranch"]] = relationship("WikiBranch", back_populates="drafts")
 
     __table_args__ = (
         Index("ix_wiki_drafts_page_id", "page_id"),
         Index("ix_wiki_drafts_status", "status"),
         Index("ix_wiki_drafts_author_id", "author_id"),
+        Index("ix_wiki_drafts_branch_id", "branch_id"),
     )
 
 

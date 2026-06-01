@@ -103,6 +103,52 @@ export default function WikiPageViewer() {
   // Edit mode
   const [mode, setMode] = React.useState<"view" | "edit">("view");
 
+  // Branches context for contributions
+  const [branches, setBranches] = React.useState<any[]>([]);
+  const [activeBranch, setActiveBranch] = React.useState<any | null>(null);
+  const [branchesLoading, setBranchesLoading] = React.useState(false);
+  const [showCreateBranch, setShowCreateBranch] = React.useState(false);
+  const [newBranchName, setNewBranchName] = React.useState("");
+  const [newBranchDesc, setNewBranchDesc] = React.useState("");
+
+  const loadBranches = React.useCallback(async () => {
+    if (!user) return;
+    setBranchesLoading(true);
+    try {
+      const scopeQs = isScoped ? `&scope_type=${scopeType}&scope_id=${scopeId}` : "";
+      const list = await api<any[]>(`/api/wiki/branches?mine=true&status=draft${scopeQs}`);
+      setBranches(list);
+      if (list.length > 0) {
+        setActiveBranch(list[0]);
+      } else {
+        const today = new Date().toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" });
+        const defaultName = `Đóng góp ngày ${today}`;
+        const newB = await api<any>("/api/wiki/branches", {
+          method: "POST",
+          body: {
+            name: defaultName,
+            description: "Nhánh đóng góp tự động được tạo khi chỉnh sửa tài liệu.",
+            scope_type: isScoped ? scopeType : "global",
+            scope_id: isScoped ? scopeId : undefined,
+          },
+        });
+        setBranches([newB]);
+        setActiveBranch(newB);
+      }
+    } catch {
+      setBranches([]);
+      setActiveBranch(null);
+    } finally {
+      setBranchesLoading(false);
+    }
+  }, [user, isScoped, scopeType, scopeId]);
+
+  React.useEffect(() => {
+    if (user && (canPropose || canEdit)) {
+      loadBranches();
+    }
+  }, [user, canPropose, canEdit, loadBranches]);
+
   // Pending drafts (for editors/admins)
   const [drafts, setDrafts] = React.useState<DraftResponse[]>([]);
 
@@ -330,6 +376,7 @@ export default function WikiPageViewer() {
           scope_type: isScoped ? scopeType : "global",
           scope_id: isScoped ? scopeId : undefined,
           base_version: page?.version,
+          branch_id: activeBranch?.id || undefined,
         },
       }
     );
@@ -602,18 +649,52 @@ export default function WikiPageViewer() {
                   onCancel={() => setEditingDraft(null)}
                 />
               ) : mode === "edit" ? (
-                <WikiEditor
-                  initialContent={page.content_md}
-                  noteLabel={canEdit ? "Change note" : "Proposal note"}
-                  notePlaceholder={
-                    canEdit
-                      ? "Briefly describe what you changed (optional)"
-                      : "Describe your proposed change (optional)"
-                  }
-                  saveLabel={canEdit ? "Save Edit" : "Submit Proposal"}
-                  onSave={canEdit ? handleSaveEdit : handleSaveProposal}
-                  onCancel={() => setMode("view")}
-                />
+                <>
+                  {/* Branch context bar for contributors */}
+                  {!canEdit && activeBranch && (
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl border border-[#a8977e]/30 bg-[#a8977e]/5 shadow-sm text-xs text-[#8a7a62]">
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-sm font-semibold">fork_right</span>
+                        <span>Đang lưu đóng góp vào nhánh: </span>
+                        <strong className="text-foreground">{activeBranch.name}</strong>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setShowCreateBranch(true)}
+                          className="px-2.5 py-1 rounded bg-[#a8977e]/15 hover:bg-[#a8977e]/25 text-foreground transition-all cursor-pointer font-medium"
+                        >
+                          Tạo nhánh mới
+                        </button>
+                        {branches.length > 1 && (
+                          <select
+                            value={activeBranch.id}
+                            onChange={(e) => {
+                              const b = branches.find((x) => x.id === e.target.value);
+                              if (b) setActiveBranch(b);
+                            }}
+                            className="h-7 px-2 rounded border border-border bg-background outline-none text-foreground cursor-pointer text-xs"
+                          >
+                            {branches.map((b) => (
+                              <option key={b.id} value={b.id}>{b.name}</option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  <WikiEditor
+                    initialContent={page.content_md}
+                    noteLabel={canEdit ? "Change note" : "Proposal note"}
+                    notePlaceholder={
+                      canEdit
+                        ? "Briefly describe what you changed (optional)"
+                        : "Describe your proposed change (optional)"
+                    }
+                    saveLabel={canEdit ? "Save Edit" : "Submit Proposal"}
+                    onSave={canEdit ? handleSaveEdit : handleSaveProposal}
+                    onCancel={() => setMode("view")}
+                  />
+                </>
               ) : isSourceView && sourceData ? (
                 <div className="space-y-6">
                   {/* File information bar */}
@@ -787,6 +868,75 @@ export default function WikiPageViewer() {
             })
           }
         />
+      )}
+      {showCreateBranch && (
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-card border border-border rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in duration-200">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-foreground">Tạo nhánh đóng góp mới</h3>
+              <button
+                onClick={() => setShowCreateBranch(false)}
+                className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-sm">close</span>
+              </button>
+            </div>
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Tên nhánh</label>
+                <input
+                  type="text"
+                  value={newBranchName}
+                  onChange={(e) => setNewBranchName(e.target.value)}
+                  placeholder="Ví dụ: thay-doi-quy-che-lam-viec"
+                  className="w-full h-9 px-3 rounded-lg border border-input bg-background text-xs outline-none focus:border-primary text-foreground"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Mô tả (Không bắt buộc)</label>
+                <textarea
+                  value={newBranchDesc}
+                  onChange={(e) => setNewBranchDesc(e.target.value)}
+                  placeholder="Mô tả tóm tắt nội dung đợt đóng góp này..."
+                  rows={3}
+                  className="w-full p-3 rounded-lg border border-input bg-background text-xs outline-none focus:border-primary resize-none text-foreground"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setShowCreateBranch(false)}
+                className="px-3 py-1.5 rounded-lg border hover:bg-muted text-xs transition-all cursor-pointer text-foreground"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={async () => {
+                  if (!newBranchName.trim()) return;
+                  try {
+                    const newB = await api<any>("/api/wiki/branches", {
+                      method: "POST",
+                      body: {
+                        name: newBranchName.trim(),
+                        description: newBranchDesc.trim() || undefined,
+                        scope_type: isScoped ? scopeType : "global",
+                        scope_id: isScoped ? scopeId : undefined,
+                      },
+                    });
+                    setBranches((prev) => [newB, ...prev]);
+                    setActiveBranch(newB);
+                    setShowCreateBranch(false);
+                    setNewBranchName("");
+                    setNewBranchDesc("");
+                  } catch {}
+                }}
+                className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground font-medium text-xs hover:opacity-90 transition-all cursor-pointer"
+              >
+                Tạo nhánh
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );

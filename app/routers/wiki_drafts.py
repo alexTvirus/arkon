@@ -11,7 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, or_, func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +51,7 @@ class ProposeDraftRequest(BaseModel):
     base_version: Optional[int] = None
     scope_type: Optional[str] = None
     scope_id: Optional[uuid.UUID] = None
+    branch_id: Optional[uuid.UUID] = None
 
     @field_validator("content_md")
     @classmethod
@@ -72,6 +73,7 @@ class ProposeCreateRequest(BaseModel):
     content_md: str
     summary: str = ""
     note: Optional[str] = None
+    branch_id: Optional[uuid.UUID] = None
 
     @field_validator("content_md")
     @classmethod
@@ -602,6 +604,8 @@ async def propose_draft(
     # created row inside this session — set it manually so the adapter can
     # resolve the page scope without an extra round trip.
     draft.page = page
+    if hasattr(body, "branch_id") and body.branch_id:
+        draft.branch_id = body.branch_id
     await log_audit(db, user, "create", "wiki_draft", str(draft.id), reason=f"draft for: {slug}")
     await contribution_service.notify_submitted(db, wiki_draft_adapter, draft, user)
     await db.commit()
@@ -647,6 +651,11 @@ async def list_all_drafts(
     if mine:
         stmt = stmt.where(WikiPageDraft.author_id == user.id)
     else:
+        # Exclude drafts that belong to unsubmitted branches
+        from app.database.models import WikiBranch
+        stmt = stmt.outerjoin(WikiBranch, WikiBranch.id == WikiPageDraft.branch_id)
+        stmt = stmt.where(or_(WikiPageDraft.branch_id == None, WikiBranch.status == "pending_merge"))
+
         page_filter = _build_reviewable_page_filter(user)
         if page_filter is False:  # noqa: E712 — never true, kept for symmetry
             return []
@@ -1030,6 +1039,8 @@ async def propose_create_page(
         draft_kind="create",
         suggested_metadata=suggested_metadata,
     )
+    if hasattr(body, "branch_id") and body.branch_id:
+        draft.branch_id = body.branch_id
     await log_audit(
         db, user, "create", "wiki_draft", str(draft.id),
         reason=f"propose new page: {body.slug}",
