@@ -13,8 +13,8 @@ chunked + embedded as-is into these tables so it is searchable in the same
 semantic pool as wiki pages, without ever being rewritten. Mirrors the
 wiki_page_embeddings_<dim> tables from migration 015.
 
-Revision ID: 031_verbatim_sources
-Revises: 53ddb764523d
+Revision ID: 036_verbatim_sources
+Revises: 035_remove_workspace_module
 Create Date: 2026-06-02
 """
 
@@ -24,8 +24,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision = "031_verbatim_sources"
-down_revision = "53ddb764523d"
+revision = "036_verbatim_sources"
+down_revision = "035_remove_workspace_module"
 branch_labels = None
 depends_on = None
 
